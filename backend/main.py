@@ -1,7 +1,3 @@
-"""
-main.py – FastAPI entrypoint (v2.1 – FIXED CORS + STABILITY)
-"""
-
 import sys
 import os
 import json
@@ -17,6 +13,7 @@ from slowapi.errors import RateLimitExceeded
 sys.path.insert(0, os.path.dirname(__file__))
 
 from config import settings
+
 try:
     from backend.database.db import init_db
     from backend.api.routes import router as audit_router
@@ -38,58 +35,64 @@ _window    = f"{settings.rate_limit_window_seconds}second"
 _limit_str = f"{settings.rate_limit_requests}/{_window}"
 limiter    = Limiter(key_func=get_remote_address)
 
+
 def get_cors_origins():
-    """
-    Safely parse CORS origins from env or settings.
-    Ensures localhost + 127.0.0.1 always allowed.
-    """
     origins = settings.cors_origins
 
     if isinstance(origins, str):
         try:
             origins = json.loads(origins)
         except Exception:
-            logger.warning("Failed to parse CORS_ORIGINS, using default fallback.")
+            logger.warning("Invalid CORS_ORIGINS format. Using fallback.")
             origins = []
 
     if not isinstance(origins, list):
         origins = []
 
-    default_origins = [
+    production_origins = [
+        "https://codeperfect-audit.vercel.app",
+        "https://codeperfect-audit-git-main-quirkynerds-projects.vercel.app",
+        "https://codeperfect-audit-e15ajic93-quirkynerds-projects.vercel.app",
+    ]
+
+    # Local dev
+    local_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:5173",
     ]
 
-    for origin in default_origins:
-        if origin not in origins:
-            origins.append(origin)
+    # Merge all
+    all_origins = list(set(origins + production_origins + local_origins))
 
-    logger.info(f"CORS enabled for origins: {origins}")
-    return origins
+    logger.info(f"CORS enabled for: {all_origins}")
+    return all_origins
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Auditor Platform")
+    logger.info("Auditor Platform Starting...")
     await init_db()
-    logger.info("Database tables initialised.")
+    logger.info("Database initialized")
     yield
-    logger.info("Shutting down.")
+    logger.info("Shutting down")
+
 
 app = FastAPI(
     title="Auditor Platform",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
 app.state.limiter = limiter
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],  
-    allow_headers=["*"],
+    allow_methods=["*"],   # IMPORTANT
+    allow_headers=["*"],   # IMPORTANT
 )
 
 
@@ -103,15 +106,17 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
         },
     )
 
+
 app.include_router(audit_router,     prefix="/api/v1")
 app.include_router(auth_router,      prefix="/api/v1")
 app.include_router(case_router,      prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 
+
 @app.get("/", tags=["root"])
 async def root():
     return {
         "service": "Auditor Platform",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "docs": "/docs"
     }
