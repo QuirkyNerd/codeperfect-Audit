@@ -1,17 +1,8 @@
-"""
-main.py – FastAPI entrypoint (FINAL FIXED VERSION)
-Fixes:
-- CORS (Vercel + local)
-- OPTIONS preflight (no more 400)
-- Rate limiter conflict
-"""
-
 import sys
 import os
-import json
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
@@ -22,7 +13,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from config import settings
 
-# Import modules
 try:
     from backend.database.db import init_db
     from backend.api.routes import router as audit_router
@@ -40,22 +30,18 @@ except ImportError:
 
 logger = get_logger(__name__)
 
-# Rate limiter
 _window = f"{settings.rate_limit_window_seconds}second"
 _limit_str = f"{settings.rate_limit_requests}/{_window}"
 limiter = Limiter(key_func=get_remote_address)
 
 
-# -------------------------------
-# APP INIT
-# -------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting Auditor Platform...")
+    logger.info("Starting Auditor Platform")
     await init_db()
-    logger.info("✅ Database initialized")
+    logger.info("Database initialized")
     yield
-    logger.info("🛑 Shutting down")
+    logger.info("Shutting down")
 
 
 app = FastAPI(
@@ -66,27 +52,6 @@ app = FastAPI(
 
 app.state.limiter = limiter
 
-
-# -------------------------------
-# 🔥 FIX 1: HANDLE OPTIONS EARLY
-# -------------------------------
-@app.middleware("http")
-async def allow_options_requests(request: Request, call_next):
-    if request.method == "OPTIONS":
-        return Response(
-            status_code=200,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "*",
-                "Access-Control-Allow-Headers": "*",
-            },
-        )
-    return await call_next(request)
-
-
-# -------------------------------
-# 🔥 FIX 2: PROPER CORS
-# -------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -100,9 +65,6 @@ app.add_middleware(
 )
 
 
-# -------------------------------
-# RATE LIMIT HANDLER
-# -------------------------------
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(
@@ -114,19 +76,13 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     )
 
 
-# -------------------------------
-# ROUTES
-# -------------------------------
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(case_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 
 
-# -------------------------------
-# ROOT
-# -------------------------------
-@app.get("/", tags=["root"])
+@app.get("/")
 async def root():
     return {
         "service": "Auditor Platform",
