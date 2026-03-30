@@ -60,8 +60,8 @@ export default function LoginPage() {
 
   const handleDemoLogin = async (e) => {
     e.preventDefault();
-    const demoEmail = 'admin@demo.com';
-    const demoPassword = 'adithya2481';
+    const demoEmail = 'admin@gmail.com';
+    const demoPassword = 'admin2481';
     setForm({ email: demoEmail, password: demoPassword });
     await performLogin(demoEmail, demoPassword);
   };
