@@ -1,18 +1,17 @@
-import asyncio
 import hashlib
-from functools import partial
+import httpx
 
 try:
     from backend.utils.logging import get_logger
 except ImportError:
     from utils.logging import get_logger
 
-from main import model
-
 logger = get_logger(__name__)
 
 _MAX_CACHE = 50000
 _embed_cache: dict[str, list[float]] = {}
+
+HF_EMBED_URL = "https://adithya3003-codeperfect-embeddings.hf.space/embed"
 
 
 def _cache_key(text: str) -> str:
@@ -30,10 +29,8 @@ def _cache_set(text: str, vector: list[float]) -> None:
 
 class EmbeddingService:
     def __init__(self):
-        if model is None:
-            raise RuntimeError("Embedding model not initialized")
-        self.model = model
-        logger.info("EmbeddingService: using preloaded model")
+        self.url = HF_EMBED_URL
+        logger.info("EmbeddingService: using HuggingFace remote embeddings")
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -52,23 +49,25 @@ class EmbeddingService:
                 miss_texts.append(text)
 
         if miss_texts:
-            loop = asyncio.get_event_loop()
-            encode_fn = partial(
-                self.model.encode,
-                miss_texts,
-                batch_size=128,
-                show_progress_bar=False
-            )
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    self.url,
+                    json={"texts": miss_texts}
+                )
 
-            vectors_np = await loop.run_in_executor(None, encode_fn)
-            vectors: list[list[float]] = [v.tolist() for v in vectors_np]
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"Embedding API failed: {response.status_code} {response.text}"
+                    )
+
+                vectors: list[list[float]] = response.json()["embeddings"]
 
             for idx, text, vec in zip(miss_indices, miss_texts, vectors):
                 _cache_set(text, vec)
                 results[idx] = vec
 
             logger.info(
-                "EmbeddingService: encoded %d texts (%d cache hits)",
+                "EmbeddingService: fetched %d embeddings (%d cache hits)",
                 len(miss_texts),
                 len(texts) - len(miss_texts),
             )
@@ -80,11 +79,5 @@ class EmbeddingService:
         if cached is not None:
             return cached
 
-        loop = asyncio.get_event_loop()
-        encode_fn = partial(self.model.encode, [text], show_progress_bar=False)
-
-        vectors_np = await loop.run_in_executor(None, encode_fn)
-        vec = vectors_np[0].tolist()
-
-        _cache_set(text, vec)
-        return vec
+        result = await self.embed_texts([text])
+        return result[0]
