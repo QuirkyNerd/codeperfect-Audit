@@ -1,0 +1,12 @@
+node_modules/
+frontend/node_modules/
+__pycache__/
+*.pyc
+.env
+.git/
+chroma_store/
+postgres_data/
+redis_data/
+codeperfect.db
+.vscode/
+tests/
