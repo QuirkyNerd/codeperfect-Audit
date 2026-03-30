@@ -89,7 +89,11 @@ async def allow_options_requests(request: Request, call_next):
 # -------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # keep * for now (fixes Vercel issue)
+    allow_origins=[
+        "https://codeperfect-audit.vercel.app",
+        "https://codeperfect-audit-git-main-quirkynerds-projects.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
