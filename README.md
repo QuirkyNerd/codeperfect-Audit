@@ -264,5 +264,3 @@ pytest tests/ -v
 | Retry logic | Agents retry up to `AGENT_MAX_RETRIES` on failure |
 
 ---
-
-```
