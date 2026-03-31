@@ -178,13 +178,10 @@ npm run dev
 ```bash
 cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
 
-# Set your key in .env first
 copy .env.example .env
-# Edit .env: Gemini_API_KEY=sk-...
-
 docker-compose up --build
 
-
+```
 ##  Testing
 
 ```bash
