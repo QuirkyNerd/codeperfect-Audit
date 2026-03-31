@@ -1,23 +1,43 @@
-# 🏥 CodePerfectAuditor
+# CodePerfect Audit
 
-> **Agentic AI Medical Coding Audit System** – Reads clinical notes and audits ICD-10 / CPT billing codes before claims are submitted, ensuring revenue integrity and compliance.
+CodePerfect Audit is an AI-powered clinical coding audit system designed to analyze medical notes and validate ICD-10 and CPT codes before claim submission. The system helps reduce revenue leakage, improve coding accuracy, and support compliance in healthcare billing workflows.
 
 ---
 
-## 🏗️ Architecture
+## Overview
+
+The platform processes clinical notes through a multi-stage AI pipeline and compares human-entered codes with AI-generated codes. It identifies discrepancies, highlights missing or incorrect codes, and provides supporting evidence from the clinical text.
+
+---
+
+## Live Deployment
+
+Frontend:  
+https://codeperfect-audit.vercel.app  
+
+Backend API:  
+https://codeperfect-audit.onrender.com  
+
+Embedding Service (Hugging Face):  
+https://adithya3003-codeperfect-embeddings.hf.space/embed  
+
+---
+
+
+##  Architecture
 
 ```
 Clinical Note
      ↓
-Clinical Reader Agent   ← GPT-4 + structured prompt
+Clinical Reader Agent   ← Gemini + structured prompt
      ↓
 Structured Clinical Facts
      ↓
-Coding Logic Agent      ← RAG (ChromaDB) + GPT-4 reasoning
+Coding Logic Agent      ← RAG (ChromaDB) + Gemini reasoning
      ↓
 AI-Generated Codes (with confidence scores)
      ↓
-Auditor Agent           ← GPT-4 + deterministic set comparison
+Auditor Agent           ← Gemini + deterministic set comparison
      ↓
 Discrepancy Report
      ↓
@@ -28,51 +48,51 @@ Frontend Dashboard      ← React + Vite
 
 ---
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 CodePerfectAuditor/
 ├── backend/
-│   ├── main.py                        # FastAPI entrypoint
-│   ├── config.py                      # Pydantic-settings configuration
-│   ├── api/routes.py                  # POST /audit, GET /health
+│   ├── main.py                       
+│   ├── config.py                      
+│   ├── api/routes.py                  
 │   ├── agents/
-│   │   ├── clinical_reader.py         # Agent 1: Extract medical entities
-│   │   ├── coding_logic.py            # Agent 2: RAG + GPT code generation
-│   │   ├── auditor.py                 # Agent 3: Code comparison & classification
-│   │   └── evidence_agent.py          # Agent 4: Sentence span highlighting
+│   │   ├── clinical_reader.py        
+│   │   ├── coding_logic.py            
+│   │   ├── auditor.py                
+│   │   └── evidence_agent.py         
 │   ├── services/
-│   │   ├── agent_orchestrator.py      # Pipeline controller
-│   │   ├── rag_engine.py              # ChromaDB wrapper
-│   │   ├── embedding_service.py       # OpenAI embedding batching
-│   │   └── guideline_loader.py        # CSV + guideline ingestion
+│   │   ├── agent_orchestrator.py     
+│   │   ├── rag_engine.py             
+│   │   ├── embedding_service.py      
+│   │   └── guideline_loader.py   
 │   ├── database/
-│   │   ├── models.py                  # SQLAlchemy ORM models
-│   │   └── db.py                      # Async session + init_db
+│   │   ├── models.py                 
+│   │   └── db.py                     
 │   ├── utils/
-│   │   ├── sentence_indexer.py        # Reliable char-span indexer
-│   │   ├── text_processing.py         # Text normalization helpers
-│   │   └── logging.py                 # JSON-structured logger
+│   │   ├── sentence_indexer.py       
+│   │   ├── text_processing.py        
+│   │   └── logging.py               
 │   └── prompts/
 │       ├── clinical_reader_prompt.txt
 │       ├── coding_logic_prompt.txt
 │       └── auditor_prompt.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/Dashboard.jsx        # Main page
+│   │   ├── pages/Dashboard.jsx       
 │   │   ├── components/
-│   │   │   ├── UploadNote.jsx         # Clinical note textarea
-│   │   │   ├── CodeInput.jsx          # Tag-style code input
-│   │   │   └── AuditResults.jsx       # Results: codes, discrepancies, evidence
-│   │   └── services/api.js            # Axios client
+│   │   │   ├── UploadNote.jsx        
+│   │   │   ├── CodeInput.jsx         
+│   │   │   └── AuditResults.jsx    
+│   │   └── services/api.js         
 │   ├── package.json
 │   └── vite.config.js
 ├── data/
-│   ├── icd10_codes.csv                # 50+ ICD-10 codes for ChromaDB
-│   ├── cpt_codes.csv                  # 30+ CPT codes for ChromaDB
-│   └── coding_guidelines/             # CMS guideline text snippets
+│   ├── icd10_codes.csv                
+│   ├── cpt_codes.csv                
+│   └── coding_guidelines/            
 ├── scripts/
-│   └── ingest_guidelines.py           # One-time ChromaDB ingestion
+│   └── ingest_guidelines.py          
 ├── tests/
 │   ├── conftest.py
 │   ├── test_clinical_reader.py
@@ -86,13 +106,27 @@ CodePerfectAuditor/
 
 ---
 
-## ⚡ Quick Start (Local)
+##  Quick Start (Local)
 
 ### 1. Prerequisites
 
-- Python 3.11+
-- Node.js 18+
-- An **OpenAI API key** with GPT-4 access
+## Tech Stack
+
+### Backend
+- FastAPI
+- Gemini API (LLM reasoning)
+- Neon PostgreSQL (cloud database)
+- SQLAlchemy
+
+### Frontend
+- React + Vite
+- Axios
+- Hosted on Vercel
+
+### AI / ML
+- Gemini (LLM)
+- MiniLM-L6-v2 (embeddings via Hugging Face)
+- Retrieval-Augmented Generation (RAG)
 
 ### 2. Clone & configure
 
@@ -121,13 +155,6 @@ cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
 python scripts/ingest_guidelines.py
 ```
 
-Expected output:
-```
-✅ Ingestion complete!
-   ICD-10 codes:        55 documents
-   CPT codes:           30 documents
-   Guideline snippets:  3 documents
-```
 
 ### 5. Start the backend
 
@@ -136,7 +163,6 @@ cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor/backend
 uvicorn main:app --reload --port 8000
 ```
 
-API docs available at: http://localhost:8000/docs
 
 ### 6. Start the frontend
 
@@ -146,35 +172,25 @@ npm install
 npm run dev
 ```
 
-Open: **http://localhost:5173**
 
----
-
-## 🐳 Docker (with PostgreSQL)
+##  Docker (with PostgreSQL)
 
 ```bash
 cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
 
 # Set your key in .env first
 copy .env.example .env
-# Edit .env: OPENAI_API_KEY=sk-...
+# Edit .env: Gemini_API_KEY=sk-...
 
 docker-compose up --build
-```
 
-Backend: http://localhost:8000  
-Swagger UI: http://localhost:8000/docs
 
----
-
-## 🧪 Testing
+##  Testing
 
 ```bash
 cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
 pytest tests/ -v
 ```
-
-Tests use mocked OpenAI calls – no real API key needed to run tests.
 
 ---
 
@@ -223,31 +239,32 @@ Tests use mocked OpenAI calls – no real API key needed to run tests.
   "service": "CodePerfectAuditor",
   "version": "1.0.0"
 }
-```
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | **required** | Your OpenAI API key |
-| `OPENAI_MODEL` | `gpt-4-1106-preview` | GPT model for agents |
-| `DATABASE_URL` | SQLite | PostgreSQL URL for production |
-| `CHROMA_PERSIST_DIR` | `./chroma_store` | ChromaDB storage directory |
-| `MIN_CODE_CONFIDENCE` | `0.65` | Confidence threshold for codes |
-| `RAG_TOP_K` | `10` | Top-K results per RAG query |
+| `GEMINI_API_KEY` | **required** | Your Gemini API key |
+| `GEMINI_MODEL` | `gemini-1.5-pro` | Model used for agent reasoning |
+| `DATABASE_URL` | Neon PostgreSQL | Connection string for Neon database |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model for embeddings |
+| `MIN_CODE_CONFIDENCE` | `0.65` | Confidence threshold for filtering codes |
+| `RAG_TOP_K` | `10` | Number of top results retrieved in RAG |
 
 ---
 
-## 🛡️ Key Design Decisions
+## Key Design Decisions
 
 | Feature | Implementation |
 |---|---|
-| **Agent orchestration** | `AgentOrchestrator` with sequential pipeline + shared state |
-| **Evidence highlighting** | `SentenceIndexer` pre-builds char offsets; no fragile string search at runtime |
-| **Confidence threshold** | Codes below `MIN_CODE_CONFIDENCE` go to a review queue, not the audit report |
-| **Deterministic fallback** | AuditorAgent uses set-based comparison if GPT fails |
-| **Database** | SQLite by default; swap to PostgreSQL with one env variable |
-| **Structured logging** | All agents emit JSON log lines for aggregator compatibility |
-| **Retry logic** | Each agent retries up to `AGENT_MAX_RETRIES` times on failure |
+| Agent orchestration | `AgentOrchestrator` with sequential multi-agent pipeline and shared state |
+| Evidence highlighting | `SentenceIndexer` with deterministic character span mapping |
+| Confidence threshold | Low-confidence codes are separated for manual review |
+| Deterministic fallback | Auditor agent uses set-based comparison if AI response fails |
+| Database | Neon PostgreSQL for scalable cloud storage |
+| Structured logging | JSON-based logging for observability and debugging |
+| Retry logic | Agents retry up to `AGENT_MAX_RETRIES` on failure |
+
+---
