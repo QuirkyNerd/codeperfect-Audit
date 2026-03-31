@@ -132,17 +132,13 @@ CodePerfectAuditor/
 
 ```bash
 cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
-
-# Copy the env template and fill in your OpenAI key
 copy .env.example backend\.env
-# Edit backend\.env and set: OPENAI_API_KEY=sk-your-real-key
 ```
 
 ### 3. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
-# Also install test dependencies:
 pip install pytest pytest-asyncio
 ```
 
