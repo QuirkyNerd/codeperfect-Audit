@@ -239,12 +239,11 @@ pytest tests/ -v
   "service": "CodePerfectAuditor",
   "version": "1.0.0"
 }
----
 
 ## Configuration
 
 | Variable | Default | Description |
-|----------|---------|------------|
+|----------|---------|-------------|
 | GEMINI_API_KEY | required | Your Gemini API key |
 | GEMINI_MODEL | gemini-1.5-pro | Model used for agent reasoning |
 | DATABASE_URL | Neon PostgreSQL | Connection string for Neon database |
@@ -257,7 +256,7 @@ pytest tests/ -v
 ## Key Design Decisions
 
 | Feature | Implementation |
-|---------|--------------|
+|---------|---------------|
 | Agent orchestration | AgentOrchestrator with sequential multi-agent pipeline and shared state |
 | Evidence highlighting | SentenceIndexer with deterministic character span mapping |
 | Confidence threshold | Low-confidence codes are separated for manual review |
@@ -265,5 +264,3 @@ pytest tests/ -v
 | Database | Neon PostgreSQL for scalable cloud storage |
 | Structured logging | JSON-based logging for observability and debugging |
 | Retry logic | Agents retry up to AGENT_MAX_RETRIES on failure |
-
----
