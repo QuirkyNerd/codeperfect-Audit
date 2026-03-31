@@ -240,7 +240,6 @@ pytest tests/ -v
   "version": "1.0.0"
 }
 
----
 
 ## Configuration
 
@@ -267,4 +266,3 @@ pytest tests/ -v
 | Structured logging | JSON-based logging for observability and debugging |
 | Retry logic | Agents retry up to `AGENT_MAX_RETRIES` on failure |
 
----
