@@ -240,6 +240,7 @@ pytest tests/ -v
   "version": "1.0.0"
 }
 
+```
 ---
 
 ##  Configuration
@@ -266,3 +267,5 @@ pytest tests/ -v
 | **Database** | SQLite by default; swap to PostgreSQL with one env variable |
 | **Structured logging** | All agents emit JSON log lines for aggregator compatibility |
 | **Retry logic** | Each agent retries up to `AGENT_MAX_RETRIES` times on failure |
+
+```
