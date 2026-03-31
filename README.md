@@ -243,29 +243,33 @@ pytest tests/ -v
 ```
 ---
 
-##  Configuration
+---
+
+## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | **required** | Your OpenAI API key |
-| `OPENAI_MODEL` | `gpt-4-1106-preview` | GPT model for agents |
-| `DATABASE_URL` | SQLite | PostgreSQL URL for production |
-| `CHROMA_PERSIST_DIR` | `./chroma_store` | ChromaDB storage directory |
-| `MIN_CODE_CONFIDENCE` | `0.65` | Confidence threshold for codes |
-| `RAG_TOP_K` | `10` | Top-K results per RAG query |
+| `GEMINI_API_KEY` | **required** | Your Gemini API key |
+| `GEMINI_MODEL` | `gemini-1.5-pro` | Model used for agent reasoning |
+| `DATABASE_URL` | Neon PostgreSQL | Connection string for Neon database |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model for embeddings |
+| `MIN_CODE_CONFIDENCE` | `0.65` | Confidence threshold for filtering codes |
+| `RAG_TOP_K` | `10` | Number of top results retrieved in RAG |
 
 ---
 
-##  Key Design Decisions
+## Key Design Decisions
 
 | Feature | Implementation |
 |---|---|
-| **Agent orchestration** | `AgentOrchestrator` with sequential pipeline + shared state |
-| **Evidence highlighting** | `SentenceIndexer` pre-builds char offsets; no fragile string search at runtime |
-| **Confidence threshold** | Codes below `MIN_CODE_CONFIDENCE` go to a review queue, not the audit report |
-| **Deterministic fallback** | AuditorAgent uses set-based comparison if GPT fails |
-| **Database** | SQLite by default; swap to PostgreSQL with one env variable |
-| **Structured logging** | All agents emit JSON log lines for aggregator compatibility |
-| **Retry logic** | Each agent retries up to `AGENT_MAX_RETRIES` times on failure |
+| Agent orchestration | `AgentOrchestrator` with sequential multi-agent pipeline and shared state |
+| Evidence highlighting | `SentenceIndexer` with deterministic character span mapping |
+| Confidence threshold | Low-confidence codes are separated for manual review |
+| Deterministic fallback | Auditor agent uses set-based comparison if AI response fails |
+| Database | Neon PostgreSQL for scalable cloud storage |
+| Structured logging | JSON-based logging for observability and debugging |
+| Retry logic | Agents retry up to `AGENT_MAX_RETRIES` on failure |
+
+---
 
 ```
