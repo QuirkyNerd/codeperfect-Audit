@@ -19,7 +19,7 @@ Backend API:
 https://codeperfect-audit.onrender.com  
 
 Embedding Service (Hugging Face):  
-https://adithya3003-codeperfect-embeddings.hf.space/embed  
+https://adithya3003-codeperfect-embeddings.hf.space/
 
 ---
 
