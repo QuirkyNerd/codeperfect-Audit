@@ -239,30 +239,31 @@ pytest tests/ -v
   "service": "CodePerfectAuditor",
   "version": "1.0.0"
 }
-
+---
 
 ## Configuration
 
 | Variable | Default | Description |
-|---|---|---|
-| `GEMINI_API_KEY` | **required** | Your Gemini API key |
-| `GEMINI_MODEL` | `gemini-1.5-pro` | Model used for agent reasoning |
-| `DATABASE_URL` | Neon PostgreSQL | Connection string for Neon database |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model for embeddings |
-| `MIN_CODE_CONFIDENCE` | `0.65` | Confidence threshold for filtering codes |
-| `RAG_TOP_K` | `10` | Number of top results retrieved in RAG |
+|----------|---------|------------|
+| GEMINI_API_KEY | required | Your Gemini API key |
+| GEMINI_MODEL | gemini-1.5-pro | Model used for agent reasoning |
+| DATABASE_URL | Neon PostgreSQL | Connection string for Neon database |
+| EMBEDDING_MODEL | all-MiniLM-L6-v2 | Sentence transformer model for embeddings |
+| MIN_CODE_CONFIDENCE | 0.65 | Confidence threshold for filtering codes |
+| RAG_TOP_K | 10 | Number of top results retrieved in RAG |
 
 ---
 
 ## Key Design Decisions
 
 | Feature | Implementation |
-|---|---|
-| Agent orchestration | `AgentOrchestrator` with sequential multi-agent pipeline and shared state |
-| Evidence highlighting | `SentenceIndexer` with deterministic character span mapping |
+|---------|--------------|
+| Agent orchestration | AgentOrchestrator with sequential multi-agent pipeline and shared state |
+| Evidence highlighting | SentenceIndexer with deterministic character span mapping |
 | Confidence threshold | Low-confidence codes are separated for manual review |
 | Deterministic fallback | Auditor agent uses set-based comparison if AI response fails |
 | Database | Neon PostgreSQL for scalable cloud storage |
 | Structured logging | JSON-based logging for observability and debugging |
-| Retry logic | Agents retry up to `AGENT_MAX_RETRIES` on failure |
+| Retry logic | Agents retry up to AGENT_MAX_RETRIES on failure |
 
+---
