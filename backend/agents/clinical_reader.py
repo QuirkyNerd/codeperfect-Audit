@@ -2,7 +2,7 @@
 agents/clinical_reader.py – Clinical Reader Agent.
 
 Reads a free-text clinical note and extracts structured medical entities
-using Gemini via the centralised async REST client.
+using the centralised async LLM client (Groq).
 
 Returns:
   {
@@ -20,9 +20,9 @@ import os
 
 try:
     # When running from project root (development)
-    from backend.config import settings
-    from backend.utils.logging import get_logger, set_request_context
-    from backend.utils.gemini_client import generate_json_async
+    from config import settings
+    from utils.logging import get_logger, set_request_context
+    from utils.llm_client import generate_json_async
 except ImportError:
     # When running from backend directory (Docker/production)
     from config import settings
@@ -58,7 +58,7 @@ class ClinicalReaderAgent:
     """
     Agent 1: Clinical Reader.
 
-    Uses Gemini (via centralised async REST client with JSON mode) to extract
+    Uses Groq (via centralised async LLM client with JSON mode) to extract
     structured medical facts from unstructured clinical documentation.
     """
 
@@ -91,11 +91,11 @@ class ClinicalReaderAgent:
             try:
                 logger.info("ClinicalReaderAgent: attempt %d.", attempt + 1)
 
-                # Async REST call — does NOT block the event loop
-                raw = await generate_json_async(full_prompt)
+                # Async REST call — Tier 2 (fast) for extraction
+                raw = await generate_json_async(full_prompt, tier="fast")
 
                 if not raw or not raw.strip():
-                    raise ValueError("Empty response from Gemini")
+                    raise ValueError("Empty response from LLM")
 
                 parsed = json.loads(raw)
 

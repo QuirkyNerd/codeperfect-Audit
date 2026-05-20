@@ -56,6 +56,7 @@ class User(Base):
     org_id        = Column(Integer, ForeignKey("organizations.id"), nullable=True)
     branch_id     = Column(Integer, ForeignKey("branches.id"), nullable=True)
     is_active     = Column(Boolean, default=True, nullable=False)
+    is_demo       = Column(Boolean, default=False, nullable=False)
     created_at    = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     organization = relationship("Organization", back_populates="users")
@@ -102,17 +103,37 @@ class Case(Base):
     processing_time  = Column(Float, default=0.0)
 
     # Metadata
-    model_used        = Column(String(100), default="gemini-1.5-flash-latest")
+    model_used        = Column(String(100), default="llama-3.3-70b-versatile")
     embedding_version = Column(String(50), default="all-MiniLM-L6-v2")
     summary           = Column(Text, default="")
-    status            = Column(String(20), default="pending")
+    status            = Column(String(20), default="draft") # draft | submitted | under_review | approved | rejected
     tokens_used       = Column(Integer, default=0)
     cost_estimate     = Column(String(50), default="$0.000")
 
+    # ✅ REVIEWER FIELDS
+    final_code_set    = Column(Text, default="[]")
+    reviewer_notes    = Column(Text, nullable=True)
+    reviewed_by       = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at       = Column(DateTime, nullable=True)
+    
+    # ✅ ASSIGNMENT & ACCOUNTABILITY
+    assigned_to       = Column(Integer, ForeignKey("users.id"), nullable=True)
+    assigned_at       = Column(DateTime, nullable=True)
+    assignment_status = Column(String(50), default="unassigned") # unassigned, assigned, reassigned
+    review_confidence = Column(Float, nullable=True) # 0.0 - 1.0
+    review_completeness = Column(String(50), default="complete")
+    review_duration   = Column(Float, nullable=True) # seconds
+    
+    # ✅ LOCKING MECHANISM
+    locked_by         = Column(Integer, ForeignKey("users.id"), nullable=True)
+    locked_at         = Column(DateTime, nullable=True)
 
+    # ✅ PRIORITY QUEUE
+    priority          = Column(String(20), default="normal") # low, normal, high
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_demo           = Column(Boolean, default=False, nullable=False)
 
     # ✅ FIXED RELATIONSHIPS
     creator = relationship(
@@ -122,12 +143,35 @@ class Case(Base):
     )
 
     organization = relationship("Organization", back_populates="cases")
+    
+    reviewer = relationship("User", foreign_keys=[assigned_to])
+    locker   = relationship("User", foreign_keys=[locked_by])
 
     __table_args__ = (
         Index("ix_cases_org_created", "org_id", "created_at"),
         Index("ix_cases_user_created", "user_id", "created_at"),
         Index("ix_cases_risk", "risk_score"),
     )
+
+
+# ── Governance & Audit ────────────────────────────────────────────────────────
+
+class GovernanceLog(Base):
+    __tablename__ = "governance_logs"
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    case_id        = Column(Integer, ForeignKey("cases.id"), nullable=True)
+    actor_id       = Column(Integer, ForeignKey("users.id"), nullable=False)
+    actor_role     = Column(String(20), nullable=False) # coder, reviewer, admin
+    action_type    = Column(String(50), nullable=False)
+    timestamp      = Column(DateTime, default=datetime.utcnow, nullable=False)
+    previous_state = Column(Text, nullable=True) # JSON
+    new_state      = Column(Text, nullable=True) # JSON
+    metadata_json  = Column(Text, nullable=True) # JSON (renamed from metadata to avoid SQLAlchemy conflicts if any)
+
+    # Relationships
+    case = relationship("Case")
+    user = relationship("User")
 
 
 # ── Legacy tables ───────────────────────────────────────────────────────────

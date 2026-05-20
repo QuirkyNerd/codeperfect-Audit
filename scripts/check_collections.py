@@ -1,7 +1,21 @@
 import chromadb
 
-client = chromadb.PersistentClient(path="chroma_store")
+CHROMA_PATH = "./backend/backend/chroma_db"
 
-print("ICD docs:", client.get_collection("icd10_codes").count())
-print("CPT docs:", client.get_collection("cpt_codes").count())
-print("Guidelines:", client.get_collection("coding_guidelines").count())
+client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+print(f"\nChecking ChromaDB at: {CHROMA_PATH}\n")
+
+collections = [
+    "icd10_codes",
+    "cpt_codes",
+    "coding_guidelines",
+    "symptoms"
+]
+
+for name in collections:
+    try:
+        collection = client.get_collection(name)
+        print(f"{name}: {collection.count():,} documents")
+    except Exception as e:
+        print(f"{name}: ERROR -> {e}")

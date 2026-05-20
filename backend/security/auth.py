@@ -22,9 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 try:
-    from backend.database.db import get_db
-    from backend.database.models import User
-    from backend.utils.logging import get_logger
+    from database.db import get_db
+    from database.models import User
+    from utils.logging import get_logger
 except ImportError:
     from database.db import get_db
     from database.models import User

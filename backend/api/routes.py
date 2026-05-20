@@ -1,17 +1,3 @@
-"""
-api/routes.py – Core audit endpoints for CodePerfectAuditor.
-[UPGRADED] Uses ClaimValueEngine (CMS 2024) for accurate revenue_impact computation.
-
-Endpoints:
-  POST /audit         – full pipeline (SSE streaming)
-  POST /audit/file    – file upload audit
-  POST /feedback      – human feedback on AI codes
-  GET  /health        – liveness + dependency check
-
-Case rows are now persisted to the Case table after every audit.
-Auth is optional on /audit (user_id stored if token present).
-"""
-
 import hashlib
 import json
 import re
@@ -22,42 +8,37 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-import redis.asyncio as aioredis
-
 try:
-    # When running from project root (development)
-    from backend.config import settings
-    from backend.database.db import get_db
-    from backend.database.models import Document, AuditResult, AgentLog, FeedbackLog, Case
-    from backend.schemas.audit import AuditRequest, FeedbackRequest
-    from backend.services.audit_pipeline import AuditPipeline
-    from backend.services.claim_values import ClaimValueEngine
-    from backend.api.file_parser import FileParser
-    from backend.security.auth import get_current_user
-    from backend.database.models import User
-    from backend.utils.code_normalizer import deduplicate_codes
-    from backend.utils.logging import get_logger, set_request_context, new_request_id
-    from backend.utils.phi_encryptor import PHIEncryptor
+    import redis.asyncio as aioredis
+    REDIS_AVAILABLE = True
 except ImportError:
-    # When running from backend directory (Docker/production)
-    from config import settings
-    from database.db import get_db
-    from database.models import Document, AuditResult, AgentLog, FeedbackLog, Case
-    from schemas.audit import AuditRequest, FeedbackRequest
-    from services.audit_pipeline import AuditPipeline
-    from services.claim_values import ClaimValueEngine
-    from api.file_parser import FileParser
-    from security.auth import get_current_user
-    from database.models import User
-    from utils.code_normalizer import deduplicate_codes
-    from utils.logging import get_logger, set_request_context, new_request_id
-    from utils.phi_encryptor import PHIEncryptor
+    aioredis = None
+    REDIS_AVAILABLE = False
+
+from config import settings
+from database.db import get_db
+from database.models import Document, AuditResult, AgentLog, FeedbackLog, Case, User
+from schemas.audit import AuditRequest, FeedbackRequest
+from services.audit_pipeline import AuditPipeline
+from services.claim_values import ClaimValueEngine
+from api.file_parser import FileParser
+from security.auth import get_current_user
+from utils.code_normalizer import deduplicate_codes
+from utils.logging import get_logger, set_request_context, new_request_id
+from utils.phi_encryptor import PHIEncryptor
+from utils.governance import log_governance
 
 logger = get_logger(__name__)
 router = APIRouter()
 
-_CACHE_ENABLED = settings.cache_max_size > 0 and settings.use_redis
-redis_client = aioredis.from_url(settings.redis_url, decode_responses=True) if settings.use_redis else None
+_CACHE_ENABLED = settings.cache_max_size > 0 and settings.use_redis and REDIS_AVAILABLE
+redis_client = None
+if _CACHE_ENABLED:
+    try:
+        redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+    except Exception as e:
+        logger.warning(f"Failed to initialize Redis cache client: {e}")
+        _CACHE_ENABLED = False
 
 
 def _compute_note_hash(note_text: str) -> str:
@@ -122,6 +103,24 @@ async def run_audit(
             status_code=403,
             detail="Reviewers cannot initiate automated audits. This feature is restricted to Coders and Admins."
         )
+
+    # ── CASE LOCK CHECK ──────────────────────────────────────────────────
+    if payload.case_id:
+        result = await db.execute(select(Case).where(Case.id == payload.case_id))
+        existing_case = result.scalar_one_or_none()
+        if existing_case:
+            # Step 1: Mandatory Environment Isolation Check
+            if existing_case.is_demo != current_user.is_demo:
+                 logger.warning("ISOLATION_BREACH_ATTEMPT (Audit): user=%s tried to access case=%d",
+                                current_user.email, payload.case_id)
+                 raise HTTPException(status_code=403, detail="Forbidden: Environment mismatch.")
+            if existing_case.status != "draft":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"This case has been {existing_case.status} and is locked for editing."
+                )
+            if existing_case.user_id != current_user.id and current_user.role == "CODER":
+                 raise HTTPException(status_code=403, detail="Access denied.")
 
     logger.info(
         "POST /audit | human_codes=%d | user=%s | ip=%s",
@@ -206,16 +205,56 @@ async def run_audit(
                     processing_time = processing_time,
                     summary         = json.dumps({
                         "summary": final_payload.get("summary", ""),
-                        "explanation": final_payload.get("explanation", "")
+                        "explanation": final_payload.get("explanation", ""),
+                        "removed_codes": final_payload.get("removed_codes", []),
                     }),
-                    model_used      = settings.gemini_model,
+                    model_used      = settings.groq_model_primary,
                     tokens_used     = tokens_used,
                     cost_estimate   = f"${cost_est:.5f}",
-                    status          = "pending",
+                    status          = "draft",
+                    # ✅ STEP 1: FORCE CORRECT CASE CREATION
+                    is_demo         = current_user.is_demo,
                 )
+                
+                # ✅ STEP 1: VERIFY DATABASE SOURCE
+                from config import settings as cfg_settings
+                print("DB URL (Creation):", cfg_settings.database_url)
+
                 db.add(case)
-                await db.flush()  # Step 2: Flush to generate Case ID
-                print("CASE ID:", case.id)
+                
+                # ✅ STEP 3: FORCE COMMIT
+                await db.commit()
+                await db.refresh(case)
+                
+                # ✅ SECTION 2 (DEMO): Auto-submit + auto-assign immediately
+                if current_user.is_demo:
+                    case.status = "submitted"
+                    await db.commit()
+                    from utils.assignment import auto_assign_reviewer
+                    assigned_id = await auto_assign_reviewer(
+                        db, case.id, current_user.id, is_demo=True
+                    )
+                    await db.commit()
+                    await db.refresh(case)
+                    print(f"CASE CREATED (demo): id={case.id}, assigned_to={case.assigned_to}, status={case.status}")
+                else:
+                    print(f"CASE CREATED: id={case.id}, status={case.status}, assigned_to={case.assigned_to}")
+                
+                # ✅ STEP 2: VERIFY CASE INSERT
+                stmt_verify = select(Case).where(Case.id == case.id)
+                res_verify = await db.execute(stmt_verify)
+                saved = res_verify.scalar_one_or_none()
+                if saved:
+                    print(f"AFTER INSERT: ID={saved.id} is_demo={saved.is_demo} assigned_to={saved.assigned_to}")
+                else:
+                    print(f"CRITICAL ERROR: CASE {case.id} NOT FOUND IN DB AFTER COMMIT!")
+
+                await log_governance(
+                    db, "create", current_user.id, current_user.role, 
+                    case_id=case.id,
+                    new_state={"status": "draft"},
+                    metadata="Case created via automated audit."
+                )
 
                 # ── Legacy persist (backward compat) ───────────────────────────
                 encrypted_note = PHIEncryptor.encrypt(payload.note_text)
@@ -233,7 +272,8 @@ async def run_audit(
                     evidence=json.dumps(final_payload.get("evidence", [])),
                     summary=json.dumps({
                         "summary": final_payload.get("summary", ""),
-                        "explanation": final_payload.get("explanation", "")
+                        "explanation": final_payload.get("explanation", ""),
+                        "removed_codes": final_payload.get("removed_codes", []),
                     }),
                     tokens_used=tokens_used,
                     cost_estimate=f"${cost_est:.5f}",
@@ -275,6 +315,7 @@ async def run_audit(
                         "discrepancies":      discrepancies,
                         "evidence":           final_payload.get("evidence", []),
                         "summary":            final_payload.get("summary", ""),
+                        "removed_codes":      final_payload.get("removed_codes", []),
                     }
                     await redis_client.setex(cache_key, 3600 * 24, json.dumps(cache_val))
                 except Exception as e:
@@ -325,45 +366,3 @@ async def submit_feedback(
         raise HTTPException(status_code=500, detail="Failed to record feedback")
 
 
-@router.get("/health", tags=["health"])
-async def health_check(db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import text
-
-    db_status    = "disconnected"
-    chroma_status = "disconnected"
-    redis_status  = "disconnected"
-
-    try:
-        await db.execute(text("SELECT 1"))
-        db_status = "connected"
-    except Exception as e:
-        logger.warning("DB health check failed: %s", e)
-
-    try:
-        try:
-            from backend.services.rag_engine import RAGEngine
-        except ImportError:
-            from services.rag_engine import RAGEngine
-        RAGEngine().client.heartbeat()
-        chroma_status = "connected"
-    except Exception as e:
-        logger.warning("ChromaDB health check failed: %s", e)
-
-    try:
-        if redis_client and await redis_client.ping():
-            redis_status = "connected"
-        elif not settings.use_redis:
-            redis_status = "disabled"
-    except Exception as e:
-        logger.warning("Redis health check failed: %s", e)
-
-    return {
-        "status":        "ok" if db_status == "connected" and redis_status in ("connected", "disabled") else "degraded",
-        "database":      db_status,
-        "vector_db":     chroma_status,
-        "redis":         redis_status,
-        "service":       "CodePerfectAuditor",
-        "version":       "2.0.0",
-        "rate_limit":    _RATE_LIMIT,
-        "cache_enabled": _CACHE_ENABLED,
-    }

@@ -16,10 +16,10 @@ import os
 
 try:
     # When running from project root (development)
-    from backend.config import settings
-    from backend.utils.logging import get_logger, set_request_context
-    from backend.utils.code_normalizer import normalize_code
-    from backend.utils.gemini_client import generate_json_async
+    from config import settings
+    from utils.logging import get_logger, set_request_context
+    from utils.code_normalizer import normalize_code
+    from utils.llm_client import generate_json_async
 except ImportError:
     # When running from backend directory (Docker/production)
     from config import settings
@@ -114,7 +114,7 @@ class AuditorAgent:
     """
 
     def __init__(self):
-        self.model_name = settings.gemini_model
+        self.model_name = settings.groq_model_primary
         self.system_prompt = _load_prompt()  # ✅ keep prompt
 
     def _clean_json_response(self, raw_text: str) -> str:
@@ -129,7 +129,7 @@ class AuditorAgent:
         self,
         human_codes: list[str],
         ai_codes: list[dict],
-        note_text: str = "",
+        clinical_summary: str = "",
     ) -> dict:
         """
         Compare human-entered codes against AI-suggested codes.
@@ -143,12 +143,12 @@ class AuditorAgent:
         # Normalise inputs before comparison
         norm_human = [normalize_code(c) for c in human_codes]
 
-        # ✅ FIX: move \n logic OUTSIDE f-string
-        note_section = ""
-        if note_text:
-            note_section = "CLINICAL NOTE EXCERPT:\n" + note_text[:800]
+        # Grounding section
+        grounding_section = ""
+        if clinical_summary:
+            grounding_section = f"CLINICAL SUMMARY GROUNDING:\n{clinical_summary}"
 
-        # ✅ SAFE f-string
+        # Safe f-string
         full_prompt = f"""
 {self.system_prompt}
 
@@ -158,7 +158,7 @@ HUMAN-ENTERED CODES:
 AI-SUGGESTED CODES:
 {json.dumps(ai_codes, indent=2)}
 
-{note_section}
+{grounding_section}
 
 IMPORTANT:
 - Return ONLY valid JSON
@@ -171,8 +171,8 @@ IMPORTANT:
         full_prompt += "\n\nReturn STRICT JSON only."
 
         try:
-            # Await async Gemini call
-            response_text = await generate_json_async(full_prompt)
+            # Await async Groq call — Tier 1 (best) for clinical comparison
+            response_text = await generate_json_async(full_prompt, tier="best")
 
             raw = self._clean_json_response(response_text)
             parsed = json.loads(raw)
@@ -192,7 +192,7 @@ IMPORTANT:
 
         except Exception as e:
             logger.warning(
-                "AuditorAgent: Gemini failed (%s) – using deterministic fallback.", e
+                "AuditorAgent: Groq failed (%s) – using deterministic fallback.", e
             )
 
             discrepancies = _deterministic_compare(norm_human, ai_codes)

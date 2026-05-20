@@ -1,25 +1,3 @@
-"""
-api/auth_routes.py – Authentication endpoints for CodePerfectAuditor.
-[HARDENED] Includes backend-enforced RBAC admin action guards:
-  - Self-deactivation forbidden (HTTP 403)
-  - Last admin cannot be deactivated (HTTP 403)
-  - All deactivation/role-change actions are audit-logged
-
-Endpoints:
-  POST /auth/signup   – register a new user (Admin can create any role; public signup = CODER)
-  POST /auth/login    – email+password → access_token + refresh httpOnly cookie
-  POST /auth/refresh  – exchange refresh cookie for new access_token
-  GET  /auth/me       – current user profile
-  GET  /auth/users    – list all users (Admin only)
-  POST /auth/users    – create user (Admin only)
-  PATCH /auth/users/{id}/role – change role (Admin only)
-
-  POST /auth/org      – create organisation (Admin only)
-  GET  /auth/org      – list organisations (Admin only)
-  POST /auth/branches – create branch (Admin only)
-  GET  /auth/branches – list branches (Admin only)
-"""
-
 import json
 from datetime import datetime
 
@@ -28,26 +6,16 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-try:
-    # When running from project root (development)
-    from backend.database.db import get_db
-    from backend.database.models import User, Organization, Branch
-    from backend.security.auth import (
-        hash_password, verify_password,
-        create_access_token, create_refresh_token, decode_token,
-        get_current_user, require_admin,
-    )
-    from backend.utils.logging import get_logger
-except ImportError:
-    # When running from backend directory (Docker/production)
-    from database.db import get_db
-    from database.models import User, Organization, Branch
-    from security.auth import (
-        hash_password, verify_password,
-        create_access_token, create_refresh_token, decode_token,
-        get_current_user, require_admin,
-    )
-    from utils.logging import get_logger
+from database.db import get_db
+from database.models import User, Organization, Branch
+from security.auth import (
+    hash_password, verify_password,
+    create_access_token, create_refresh_token, decode_token,
+    get_current_user, require_admin,
+)
+from utils.logging import get_logger
+from utils.governance import log_governance
+from config import settings
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -59,7 +27,6 @@ class SignupRequest(BaseModel):
     name:      str
     email:     EmailStr
     password:  str
-    role:      str = "CODER"   # ADMIN | CODER | REVIEWER
     org_id:    int | None = None
     branch_id: int | None = None
 
@@ -82,6 +49,15 @@ class UserOut(BaseModel):
         from_attributes = True
 
 
+class AdminCreateUserRequest(BaseModel):
+    name:      str
+    email:     EmailStr
+    password:  str
+    role:      str = "CODER"   # ADMIN | CODER | REVIEWER
+    org_id:    int | None = None
+    branch_id: int | None = None
+
+
 class OrgRequest(BaseModel):
     name: str
 
@@ -99,33 +75,32 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+class DemoLoginRequest(BaseModel):
+    role: str   # coder | reviewer | admin
+
+
 # ── Signup ────────────────────────────────────────────────────────────────────
 
 @router.post("/signup", status_code=201)
 async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
-    """Public signup — always creates CODER role. Admin role must be set by existing admin."""
+    """Public signup — always creates CODER role."""
     existing = await db.execute(select(User).where(User.email == payload.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Email already registered.")
-
-    # First user ever gets ADMIN role automatically
-    user_count_result = await db.execute(select(User))
-    all_users = user_count_result.scalars().all()
-    role = "ADMIN" if len(all_users) == 0 else "CODER"
 
     user = User(
         name=payload.name,
         email=payload.email,
         password_hash=hash_password(payload.password),
-        role=role,
+        role="CODER",
         org_id=payload.org_id,
         branch_id=payload.branch_id,
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    logger.info("New user registered: %s (role=%s)", user.email, user.role)
-    return {"message": f"Account created. Role: {user.role}", "user_id": user.id, "role": user.role}
+    logger.info("New user registered: %s (role=CODER)", user.email)
+    return {"message": "Account created. Role: CODER", "user_id": user.id, "role": "CODER"}
 
 
 # ── Login ─────────────────────────────────────────────────────────────────────
@@ -173,6 +148,89 @@ async def login(payload: LoginRequest, response: Response, db: AsyncSession = De
     }
 
 
+@router.post("/demo-login")
+async def demo_login(payload: DemoLoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
+    """
+    SECTION 2, 3, 5, 6: GUARANTEED DEMO LOGIN
+    Must never return 403. Must always return a valid token + role.
+    """
+    print(f"DEBUG: Demo login requested for role: {payload.role}")
+    logger.info("Demo login requested for role: %s", payload.role)
+    
+    try:
+        role = payload.role.upper()
+        if role not in ("CODER", "REVIEWER", "ADMIN"):
+            role = "CODER"
+
+        email = f"{role.lower()}_demo@codeperfect.demo"
+        password = "demo-password-2026"
+
+        # Find or Create Demo User
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+
+        if not user:
+            # Get or create demo org
+            res_org = await db.execute(select(Organization).where(Organization.name == "CodePerfect Hospital"))
+            org = res_org.scalar_one_or_none()
+            if not org:
+                org = Organization(name="CodePerfect Hospital")
+                db.add(org)
+                await db.commit()
+                await db.refresh(org)
+
+            user = User(
+                name=f"Demo {role.capitalize()}",
+                email=email,
+                password_hash=hash_password(password),
+                role=role,
+                org_id=org.id,
+                is_active=True,
+                is_demo=True
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        else:
+            user.is_demo = True
+            user.is_active = True
+            await db.commit()
+
+        access_token  = create_access_token(user.id, user.role, user.email)
+        refresh_token = create_refresh_token(user.id)
+
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            max_age=7 * 24 * 3600,
+            samesite="lax",
+            secure=False,
+        )
+
+        return {
+            "access_token": access_token,
+            "token_type":   "bearer",
+            "role":         user.role,
+            "user": {
+                "id":    user.id,
+                "name":  user.name,
+                "email": user.email,
+                "role":  user.role,
+            },
+            "demo_session": True
+        }
+    except Exception as e:
+        logger.error(f"CRITICAL DEMO FAILURE: {str(e)}")
+        # If DB fails completely, we try a desperate fallback with a hardcoded mock user ID if possible
+        # but in a real system, we might need a working DB. 
+        # We'll return a 500 with the error to help the user debug.
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Demo Login Error: {str(e)}. Ensure database is running and seeded."
+        )
+
+
 # ── Refresh ───────────────────────────────────────────────────────────────────
 
 @router.post("/refresh")
@@ -206,6 +264,7 @@ async def get_me(current_user: User = Depends(get_current_user)):
         "name":      current_user.name,
         "email":     current_user.email,
         "role":      current_user.role,
+        "is_demo":   current_user.is_demo,
         "org_id":    current_user.org_id,
         "branch_id": current_user.branch_id,
     }
@@ -213,10 +272,26 @@ async def get_me(current_user: User = Depends(get_current_user)):
 
 # ── Admin: User Management ────────────────────────────────────────────────────
 
-@router.get("/users", dependencies=[Depends(require_admin)])
-async def list_users(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).order_by(User.created_at.desc()))
+@router.get("/users")
+async def list_users(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Admin panel: List users with strict demo isolation."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    # ✅ SECTION 4: USER MANAGEMENT ISOLATION
+    if current_user.is_demo:
+        print(f"USER FETCH: is_demo={current_user.is_demo} → returning demo accounts only")
+        stmt = select(User).where(User.is_demo == True).order_by(User.created_at.desc())
+    else:
+        print(f"USER FETCH: is_demo={current_user.is_demo} → returning production accounts only")
+        stmt = select(User).where(User.is_demo == False).order_by(User.created_at.desc())
+
+    result = await db.execute(stmt)
     users  = result.scalars().all()
+    print(f"USER FETCH: returning {len(users)} users")
     return [
         {
             "id": u.id, "name": u.name, "email": u.email,
@@ -227,8 +302,13 @@ async def list_users(db: AsyncSession = Depends(get_db)):
     ]
 
 
-@router.post("/users", status_code=201, dependencies=[Depends(require_admin)])
-async def create_user(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
+@router.post("/users", status_code=201)
+async def create_user(
+    payload: AdminCreateUserRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Admin-only: create a new user account."""
     existing = await db.execute(select(User).where(User.email == payload.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Email already registered.")
@@ -236,10 +316,15 @@ async def create_user(payload: SignupRequest, db: AsyncSession = Depends(get_db)
         name=payload.name, email=payload.email,
         password_hash=hash_password(payload.password),
         role=payload.role, org_id=payload.org_id, branch_id=payload.branch_id,
+        is_demo=current_user.is_demo,  # Inherit demo status from admin
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    await log_governance(
+        db, "user_create", current_user.id, current_user.role,
+        metadata=f"Admin created user {user.email} with role {user.role}"
+    )
     return {"message": "User created.", "user_id": user.id, "role": user.role}
 
 
@@ -254,10 +339,18 @@ async def update_role(
     user   = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
+    
+    # Environment Isolation Check
+    if user.is_demo != current_user.is_demo:
+        raise HTTPException(status_code=403, detail="Forbidden: User environment mismatch.")
     if payload.role not in ("ADMIN", "CODER", "REVIEWER"):
         raise HTTPException(status_code=400, detail="Invalid role. Must be ADMIN, CODER, or REVIEWER.")
     old_role = user.role
     user.role = payload.role
+    await log_governance(
+        db, "user_update", current_user.id, current_user.role,
+        metadata=f"Changed role of {user.email} from {old_role} to {payload.role}"
+    )
     await db.commit()
     logger.info(
         "AUDIT: Admin %s (id=%d) changed role of user %s (id=%d) from %s to %s.",
@@ -282,7 +375,15 @@ async def reset_password(
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
 
+    # Environment Isolation Check
+    if target.is_demo != current_user.is_demo:
+        raise HTTPException(status_code=403, detail="Forbidden: User environment mismatch.")
+
     target.password_hash = hash_password(payload.new_password)
+    await log_governance(
+        db, "user_update", current_user.id, current_user.role,
+        metadata=f"Reset password for {target.email}"
+    )
     await db.commit()
     await db.refresh(target)
 
@@ -295,42 +396,73 @@ async def reset_password(
     return {"message": f"Password for '{target.name}' has been reset successfully."}
 
 
-@router.delete("/users/{user_id}")
-async def deactivate_user(
+@router.patch("/users/{user_id}/toggle-active")
+async def toggle_user_active(
     user_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_admin),   # enforces ADMIN + authenticated
+    current_user: User = Depends(require_admin),
 ):
     """
-    Delete a user account. ADMIN-only.
+    Toggle a user's is_active status. ADMIN-only.
     """
-    print("DELETE CALLED", user_id)
-    # ── Guard 1: Self-deactivation ─────────────────────────────────────────────
     if user_id == current_user.id:
-        logger.warning(
-            "AUDIT BLOCK: Admin %s (id=%d) attempted self-deactivation.",
-            current_user.email, current_user.id,
-        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You cannot deactivate your own account. Contact another Administrator.",
+            detail="You cannot deactivate your own account.",
         )
 
-    try:
-        user = await db.get(User, user_id)
-        if not user:
-            raise HTTPException(404, "User not found")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-        from sqlalchemy import text
-        await db.execute(text("UPDATE cases SET user_id = NULL WHERE user_id = :id"), {"id": user_id})
+    # Environment Isolation Check
+    if user.is_demo != current_user.is_demo:
+        raise HTTPException(status_code=403, detail="Forbidden: User environment mismatch.")
 
-        await db.delete(user)
-        await db.commit()
+    user.is_active = not user.is_active
+    action = "activated" if user.is_active else "deactivated"
+    await log_governance(
+        db, "user_update", current_user.id, current_user.role,
+        metadata=f"{action.capitalize()} user {user.email}"
+    )
+    await db.commit()
+    
+    logger.info("AUDIT: Admin %s %s user %s.", current_user.email, action, user.email)
+    return {"message": f"User {action}.", "is_active": user.is_active}
 
-        return {"message": "User deleted"}
-    except Exception as e:
-        print("DELETE ERROR:", str(e))
-        raise HTTPException(500, str(e))
+
+@router.delete("/users/{user_id}", status_code=200)
+async def delete_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Admin-only: permanently delete a user account."""
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot delete your own account.",
+        )
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Environment Isolation Check
+    if user.is_demo != current_user.is_demo:
+        raise HTTPException(status_code=403, detail="Forbidden: User environment mismatch.")
+
+    await log_governance(
+        db, "user_delete", current_user.id, current_user.role,
+        metadata=f"Admin permanently deleted user {user.email} (role={user.role})"
+    )
+    await db.delete(user)
+    await db.commit()
+
+    logger.info("AUDIT: Admin %s deleted user %s (id=%d).", current_user.email, user.email, user_id)
+    return {"message": "User deleted successfully."}
 
 
 # ── Admin: Organisation & Branch Management ───────────────────────────────────

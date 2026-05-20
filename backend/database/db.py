@@ -1,69 +1,77 @@
 """
 database/db.py – Async SQLAlchemy engine and session management.
 
-Uses SQLite + aiosqlite by default (zero-config local development).
-Switch to PostgreSQL by setting DATABASE_URL in .env, e.g.:
-  DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/codeperfect
+Optimized for PostgreSQL with connection pooling and stability checks.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.pool import NullPool
-
 from config import settings
 from database.models import Base
-try:
-    from backend.utils.logging import get_logger
-except ImportError:
-    from utils.logging import get_logger
+from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# ── Engine ────────────────────────────────────────────────────────────────────
-# NullPool is recommended for SQLite; for Postgres use default pool.
-_pool_args = {}
-if "sqlite" in settings.database_url:
-    _pool_args["poolclass"] = NullPool
-    _connect_args = {"check_same_thread": False}
-else:
-    _connect_args = {}
-
+# -------------------------------
+# 🗄️ Engine (Postgres optimized)
+# -------------------------------
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    connect_args=_connect_args,
-    **_pool_args,
+    pool_pre_ping=True,      # Verify connection health before use
+    pool_size=10,            # Balanced pool size
+    max_overflow=20,         # Allow temporary spikes
 )
 
-# ── Session factory ───────────────────────────────────────────────────────────
+# -------------------------------
+# 📦 Session factory
+# -------------------------------
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
     expire_on_commit=False,
     autoflush=False,
-    autocommit=False,
 )
 
-
+# -------------------------------
+# 🚀 Init DB
+# -------------------------------
 async def init_db() -> None:
     """Create all tables defined in models.py (idempotent)."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database schema verified / created.")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        # 🚀 Seed initial data (Local import to avoid circular dependency)
+        try:
+            from database.seed_users import seed
+            await seed()
+        except Exception as seed_err:
+            logger.error(f"⚠️ Seeding failed: {seed_err}")
+            # We continue startup even if seeding fails
+
+        logger.info("✅ Database schema verified / created")
+        logger.info(f"🔗 DB Connected: {settings.database_url.split('@')[-1]}")
+
+    except Exception as e:
+        logger.error("❌ Database initialization failed")
+        logger.error(str(e))
+        raise
 
 
+# -------------------------------
+# 🔄 Dependency (FastAPI)
+# -------------------------------
 async def get_db():
     """
     FastAPI dependency that yields an AsyncSession per request.
-
-    Usage:
-        db: AsyncSession = Depends(get_db)
     """
     async with AsyncSessionLocal() as session:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except Exception as e:
             await session.rollback()
+            logger.error(f"❌ DB transaction failed: {str(e)}")
             raise
         finally:
             await session.close()

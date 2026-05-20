@@ -6,7 +6,7 @@ function getCodeLabel(code) {
   return entry ? `${entry.code} – ${entry.description}` : code;
 }
 
-export default function CodeInput({ codes = [], onChange = () => {}, noteText = '' }) {
+export default function CodeInput({ codes = [], onChange = () => {}, noteText = '', disabled = false }) {
   const [inputVal, setInputVal] = useState('');
 
   const quickCodes = useMemo(() => {
@@ -86,8 +86,9 @@ export default function CodeInput({ codes = [], onChange = () => {}, noteText = 
             {code}
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); removeCode(code); }}
-              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '0.9rem', lineHeight: 1, padding: 0, opacity: 0.7 }}
+              onClick={(e) => { if (!disabled) { e.stopPropagation(); removeCode(code); } }}
+              disabled={disabled}
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: disabled ? 'default' : 'pointer', fontSize: '0.9rem', lineHeight: 1, padding: 0, opacity: disabled ? 0.3 : 0.7 }}
               aria-label={`Remove code ${code}`}
             >×</button>
           </span>
@@ -99,7 +100,8 @@ export default function CodeInput({ codes = [], onChange = () => {}, noteText = 
           value={inputVal}
           onChange={e => setInputVal(e.target.value)}
           onKeyDown={handleKeyDown}
-          onBlur={() => inputVal.trim() && addCode(inputVal)}
+          onBlur={() => !disabled && inputVal.trim() && addCode(inputVal)}
+          disabled={disabled}
           placeholder={(codes?.length || 0) === 0 ? 'Type a code, e.g. I10' : '+ Add code'}
           aria-label="Enter ICD-10 or CPT code"
           style={{
@@ -124,8 +126,8 @@ export default function CodeInput({ codes = [], onChange = () => {}, noteText = 
               <button
                 key={code}
                 type="button"
-                onClick={() => addCode(code)}
-                disabled={alreadyAdded}
+                onClick={() => !disabled && addCode(code)}
+                disabled={disabled || alreadyAdded}
                 title={label}
                 aria-label={`Quick add: ${label}`}
                 style={{

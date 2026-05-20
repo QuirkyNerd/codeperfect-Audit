@@ -16,7 +16,7 @@ from typing import List, Dict, Set
 import re
 
 try:
-    from backend.utils.logging import get_logger
+    from utils.logging import get_logger
 except ImportError:
     from utils.logging import get_logger
 
@@ -114,6 +114,8 @@ _PROCEDURE_KEYWORDS: set[str] = {
     "colostomy", "ileostomy", "mastectomy", "hysterectomy", "prostatectomy",
     "thyroidectomy", "cesarean section", "laparoscopic", "open",
     "echocardiogram", "ekg", "electrocardiogram",
+    "orif", "fixation", "reduction", "intramedullary", "osteotomy", "debridement",
+    "hardware", "fusion", "reconstruction"
 }
 
 _MEDICATION_KEYWORDS: set[str] = {
@@ -284,24 +286,21 @@ class ClinicalEntityFilter:
         for ent in entities:
             ec = ent["entity_class"]
 
-            # Rule 1: drop symptoms if diagnosis exists
-            if ec == "symptom" and has_diagnosis:
-                logger.info(
-                    "PreRAGFilter: dropped symptom entity '%s' (diagnosis exists)",
-                    ent.get("entity"),
-                )
-                continue
-
-            # Rule 2: drop labs, observations, medications (not billable as diagnosis)
-            if ec in ("lab", "observation", "medication"):
-                logger.info(
-                    "PreRAGFilter: dropped %s entity '%s'", ec, ent.get("entity")
-                )
-                continue
-
+            # SOFT CALIBRATION: Stop dropping symptom entities here. 
+            # We want them to reach RAG to find related codes. 
+            # SelectionEngine and PostFilter will handle suppression if redundant.
+            
+            # Rule 2: allow labs, observations, medications to reach RAG 
+            # (they ground specific diagnoses like CKD or MI)
+            
             filtered_entities.append(ent)
             if ent.get("rag_query"):
                 filtered_queries.append(ent["rag_query"])
+
+        # 🚨 TASK 14: PRESERVE EMERGENCY QUERIES
+        if not filtered_queries and rag_queries:
+            logger.info("PreRAGFilter: no entity queries, preserving %d emergency queries", len(rag_queries))
+            filtered_queries = rag_queries
 
         # Also filter deterministic codes whose entity_class would be symptom/lab/obs
         filtered_det = []
@@ -419,11 +418,12 @@ class ClinicalGroundingEngine:
 
     # Entity types that cannot produce certain code types
     _TYPE_ALIGNMENT_RULES: dict[str, set[str]] = {
-        # entity_class → set of ICD chapter letters it CANNOT produce
-        "symptom": set(),      # symptoms CAN produce R codes, but get suppressed later if diagnosis exists
-        "lab": {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"},  # labs cannot produce diagnosis
-        "observation": {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"},
-        "medication": {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"},
+        # SOFT CALIBRATION: Allow labs/obs/meds to ground diagnoses. 
+        # They are often critical evidence for specific codes (e.g. Troponin for MI).
+        "symptom": set(),
+        "lab": set(),
+        "observation": set(),
+        "medication": set(),
     }
 
     @staticmethod
@@ -432,21 +432,16 @@ class ClinicalGroundingEngine:
         note_entities: List[str],
         entity_classes: Dict[str, str],
         note_text: str = "",
-    ) -> List[Dict]:
+    ) -> Dict[str, List[Dict]]:
         """
         Filter RAG candidates to only include codes with clinical grounding.
 
-        Args:
-            rag_candidates: list of {code, description, type, confidence, ...}
-            note_entities: list of extracted entity strings
-            entity_classes: dict of entity_text -> entity_class (diagnosis/symptom/etc)
-            note_text: original note text for evidence checking
-
-        Returns: filtered candidate list with grounding metadata added
+        Returns: { "grounded": [...], "rejected": [...] }
         """
         note_lower = note_text.lower()
         entity_set = {e.lower() for e in note_entities}
         grounded: List[Dict] = []
+        rejected: List[Dict] = []
         rejected_count = 0
 
         for candidate in rag_candidates:
@@ -479,6 +474,8 @@ class ClinicalGroundingEngine:
                         grounded.append(candidate)
                     else:
                         rejected_count += 1
+                        candidate["rejection_reason"] = "no_procedure_context"
+                        rejected.append(candidate)
                         logger.debug("Grounding: rejected CPT %s (no procedure context)", code)
                 continue
 
@@ -495,15 +492,21 @@ class ClinicalGroundingEngine:
                 if entity_words and entity_words & desc_words:
                     supporting_entity = entity
                     break
+            
+            # 🚨 TASK 12: SOFT EVIDENCE FUSION
+            # If RAG score is high (semantic confidence), allow without literal grounding
+            if not supporting_entity and confidence > 0.80:
+                supporting_entity = "semantic_match"
+                candidate["grounding"] = "high_conf_semantic"
+                candidate["grounding_entity"] = "implicit"
 
             if not supporting_entity:
                 # Fallback: check if code's prefix matches any entity's expected ICD family
-                # (use ENTITY_PREFIX_MAP from group_config as seed reference)
                 try:
                     try:
-                        from backend.services.group_config import ENTITY_PREFIX_MAP
+                        from services.clinical_rules_config import ENTITY_PREFIX_MAP
                     except ImportError:
-                        from services.group_config import ENTITY_PREFIX_MAP
+                        from services.clinical_rules_config import ENTITY_PREFIX_MAP
 
                     code_pfx = code.split(".")[0] if "." in code else code[:3]
                     for entity_kw, allowed_pfxs in ENTITY_PREFIX_MAP.items():
@@ -516,6 +519,8 @@ class ClinicalGroundingEngine:
 
             if not supporting_entity:
                 rejected_count += 1
+                candidate["rejection_reason"] = "no_supporting_entity"
+                rejected.append(candidate)
                 logger.debug("Grounding: rejected %s '%s' (no supporting entity)", code, desc[:50])
                 continue
 
@@ -526,18 +531,18 @@ class ClinicalGroundingEngine:
                 code_chapter = code[0].upper() if code else ""
                 if code_chapter in blocked_chapters:
                     rejected_count += 1
+                    candidate["rejection_reason"] = f"type_alignment_mismatch ({entity_class} vs chapter {code_chapter})"
+                    rejected.append(candidate)
                     logger.debug(
                         "Grounding: rejected %s (entity '%s' class='%s' cannot produce chapter '%s')",
                         code, supporting_entity, entity_class, code_chapter,
                     )
                     continue
 
-            # Rule 4: Evidence text check — does the note actually mention this condition?
+            # Rule 4: Evidence text check
             evidence_found = supporting_entity in note_lower
-            if not evidence_found:
-                # Weaker check: any word from supporting entity in note
-                entity_words = supporting_entity.lower().split()
-                evidence_found = any(w in note_lower for w in entity_words if len(w) > 3)
+            if not evidence_found and len(supporting_entity) > 8:
+                 evidence_found = any(w in note_lower for w in supporting_entity.split() if len(w) > 5)
 
             # Add grounding metadata
             candidate["grounding"] = "entity_confirmed" if evidence_found else "entity_inferred"
@@ -545,10 +550,14 @@ class ClinicalGroundingEngine:
             candidate["evidence_found"] = evidence_found
             grounded.append(candidate)
 
+        # 🚨 TASK 12: GROUNDING TRACE
         logger.info(
-            "ClinicalGroundingEngine: %d/%d candidates grounded, %d rejected",
-            len(grounded), len(rag_candidates), rejected_count,
+            "GROUNDING_TRACE: pool=%d -> grounded=%d (rejected=%d)",
+            len(rag_candidates), len(grounded), rejected_count
         )
 
-        return grounded
+        return {
+            "grounded": grounded,
+            "rejected": rejected
+        }
 

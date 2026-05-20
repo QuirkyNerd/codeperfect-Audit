@@ -1,17 +1,17 @@
 """
 api/file_parser.py - Handles incoming file uploads (PDF, DOCX, Image) and extracts plain text.
-Requires pdfplumber, python-docx, Pillow, and google-generativeai for images.
+Optimised for benchmark stability (removing Gemini Vision dependency).
 """
 import io
 import pdfplumber
 import docx
 from PIL import Image
-import google.generativeai as genai
-from fastapi import UploadFile
 
+from fastapi import UploadFile, HTTPException
 from config import settings
+from utils.logging import get_logger
 
-genai.configure(api_key=settings.gemini_api_key)
+logger = get_logger(__name__)
 
 class FileParser:
     @staticmethod
@@ -24,7 +24,6 @@ class FileParser:
         
         if filename.endswith(".pdf"):
             text = ""
-            # pdfplumber takes a bytes stream
             with pdfplumber.open(io.BytesIO(content)) as pdf:
                 for page in pdf.pages:
                     extracted = page.extract_text()
@@ -37,13 +36,13 @@ class FileParser:
             return "\n".join([paragraph.text for paragraph in doc.paragraphs])
             
         elif filename.endswith((".png", ".jpg", ".jpeg")):
-            # Use Gemini Vision for OCR/Analysis
-            image = Image.open(io.BytesIO(content))
-            # gemini-1.5-flash natively supports multimodal
-            model = genai.GenerativeModel(settings.gemini_model)
-            prompt = "Extract all text and clinical information from this image verbatim. Output only the plain text. Preserve structure."
-            response = await model.generate_content_async([prompt, image])
-            return response.text
+            # OCR is temporarily disabled following the Groq migration
+            # as Groq models are primarily text-based reasoning.
+            logger.error("OCR attempted but Vision provider (Gemini) has been removed.")
+            raise HTTPException(
+                status_code=400,
+                detail="Image parsing (OCR) is temporarily unavailable during LLM infrastructure migration."
+            )
             
         else:
             # Assume plain text

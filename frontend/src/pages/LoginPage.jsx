@@ -11,12 +11,12 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  const { login, token } = useAuth();
+  const { login, logout, user, token, isDemoEnabled } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
     if (token) {
-      navigate("/", { replace: true });
+      navigate(ROLE_HOME[user?.role] || '/', { replace: true });
     }
   }, [token, navigate]);
 
@@ -76,12 +76,23 @@ export default function LoginPage() {
   };
 
   const handleDemoLogin = async () => {
-    const demoEmail = "admin@gmail.com";
-    const demoPassword = "admin2481";
-
-    setForm({ email: demoEmail, password: demoPassword });
-
-    await performLogin(demoEmail, demoPassword);
+    setLoading(true);
+    setError("");
+    try {
+      console.log("DEBUG: Initiating demo login sequence...");
+      const res = await authApi.demoLogin("coder");
+      if (res.data && res.data.access_token) {
+        const { user, access_token } = res.data;
+        login(user, access_token);
+        navigate(ROLE_HOME[user.role] || "/", { replace: true });
+      }
+    } catch (err) {
+      console.error("DEMO LOGIN FAILURE:", err.response || err);
+      const msg = err.response?.data?.detail || err.message || "Demo access is currently unavailable.";
+      setError(`Demo Error: ${msg}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -163,8 +174,10 @@ export default function LoginPage() {
             className="auth-submit demo-btn"
             onClick={handleDemoLogin}
             disabled={loading}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
           >
-            Use Demo Account
+            {loading && <span className="spinner" style={{ width: 14, height: 14 }} />}
+            Use Demo Access
           </button>
         </form>
 

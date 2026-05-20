@@ -13,7 +13,7 @@ INR conversion: 1 USD = 84 INR (RBI reference March 2024)
 """
 
 try:
-    from backend.utils.logging import get_logger
+    from utils.logging import get_logger
 except ImportError:
     from utils.logging import get_logger
 

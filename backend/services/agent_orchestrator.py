@@ -1,52 +1,24 @@
 """
-services/agent_orchestrator.py – Central pipeline controller for CodePerfectAuditor.
+services/agent_orchestrator.py – Central Multi-Agent Pipeline Orchestrator.
 
-The AgentOrchestrator manages:
-  - Sequential agent execution (Clinical Reader → Coding Logic → Auditor → Evidence Highlighter)
-  - Shared pipeline state propagation between agents
-  - Per-agent retry handling
-  - Confidence threshold enforcement
-  - Structured pipeline execution logging
-
-This isolates all orchestration logic from the HTTP layer (routes.py) and keeps
-each agent file focused purely on its own reasoning task.
-
-Pipeline state schema:
-  {
-    "note_text": str,
-    "human_codes": list[str],
-    "clinical_facts": dict,        # from ClinicalReaderAgent
-    "ai_codes": list[dict],        # from CodingLogicAgent (above threshold)
-    "low_confidence_codes": list[dict],
-    "discrepancies": list[dict],   # from AuditorAgent
-    "summary": str,
-    "evidence": list[dict],        # from EvidenceHighlighterAgent
-    "pipeline_log": list[dict],
-  }
+RESPONSIBILITIES:
+  1. Orchestrates the sequential execution of the clinical audit agents.
+  2. Manages shared pipeline state and data propagation between stages.
+  3. Enforces confidence thresholds and per-agent retry logic.
+  4. Provides structured execution logging for audit traceability.
 """
 
 import asyncio
 import time
 from typing import Any
 
-try:
-    # When running from project root (development)
-    from backend.agents.clinical_reader import ClinicalReaderAgent
-    from backend.agents.coding_logic import CodingLogicAgent
-    from backend.agents.auditor import AuditorAgent
-    from backend.agents.evidence_agent import EvidenceHighlighterAgent
-    from backend.config import settings
-    from backend.utils.logging import get_logger
-    from backend.services.embedding_service import EmbeddingService
-except ImportError:
-    # When running from backend directory (Docker/production)
-    from agents.clinical_reader import ClinicalReaderAgent
-    from agents.coding_logic import CodingLogicAgent
-    from agents.auditor import AuditorAgent
-    from agents.evidence_agent import EvidenceHighlighterAgent
-    from config import settings
-    from utils.logging import get_logger
-    from services.embedding_service import EmbeddingService
+from agents.clinical_reader import ClinicalReaderAgent
+from agents.coding_logic import CodingLogicAgent
+from agents.auditor import AuditorAgent
+from agents.evidence_agent import EvidenceHighlighterAgent
+from config import settings
+from utils.logging import get_logger
+from services.embedding_service import EmbeddingService
 
 logger = get_logger(__name__)
 

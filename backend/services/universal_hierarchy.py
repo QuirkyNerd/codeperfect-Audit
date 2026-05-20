@@ -32,10 +32,10 @@ except ImportError:
 
 # Import seed configs (primary rules)
 try:
-    from backend.services.hierarchy_config import CROSS_PREFIX_SUPPRESS, HIERARCHY_SUPPRESSION
+    from services.clinical_rules_config import CROSS_PREFIX_SUPPRESS, HIERARCHY_SUPPRESSION
 except ImportError:
     try:
-        from services.hierarchy_config import CROSS_PREFIX_SUPPRESS, HIERARCHY_SUPPRESSION
+        from services.clinical_rules_config import CROSS_PREFIX_SUPPRESS, HIERARCHY_SUPPRESSION
     except ImportError:
         CROSS_PREFIX_SUPPRESS = {}
         HIERARCHY_SUPPRESSION = {}

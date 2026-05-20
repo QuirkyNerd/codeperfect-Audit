@@ -6,7 +6,8 @@ import { useAuth } from '../main.jsx';
 import { useNavigate } from 'react-router-dom';
 import '../styles/dashboard.css';
 
-const ROLE_COLORS = { ADMIN: '#ef4444', CODER: '#6366f1', REVIEWER: '#10b981' };
+const ROLE_COLORS = { ADMIN: '#10b981', CODER: '#10b981', REVIEWER: '#10b981' };
+
 function calcPwStrength(pw) {
   if (!pw) return { score: 0, label: '', color: 'transparent' };
   let s = 0;
@@ -279,51 +280,64 @@ function AddUserDrawer({ onClose, onSuccess, toast }) {
   );
 }
 
-function UserCard({ u, currentUser, onDelete, onReset, busy }) {
+function UserCard({ u, currentUser, onDelete, onReset, onRoleChange, busy }) {
   const isSelf = u.id === currentUser.id;
-  const canDelete = !isSelf;
+  const roleColor = ROLE_COLORS[u.role] || '#6366f1';
 
   return (
-    <div className="user-card">
-      <div
-        className="user-card-avatar"
-        style={{ background: ROLE_COLORS[u.role] ? `linear-gradient(135deg, ${ROLE_COLORS[u.role]}aa, ${ROLE_COLORS[u.role]})` : 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
-        aria-hidden="true"
-      >
-        {u.name?.[0]?.toUpperCase() || '?'}
-      </div>
-      <div className="user-card-info">
-        <div className="user-card-name">
-          {u.name}
-          {isSelf && <span style={{ fontSize: '0.7rem', color: 'var(--clr-text-muted)', marginLeft: '0.4rem' }}>(you)</span>}
-        </div>
-        <div className="user-card-email">{u.email}</div>
-        <div style={{ marginTop: '0.3rem' }}>
-          <span className="role-badge">{u.role}</span>
-        </div>
-        <div className="user-card-joined">Joined {new Date(u.created_at).toLocaleDateString()}</div>
-      </div>
-      <div className="user-card-actions">
-        <button
-          className="deactivate-btn" style={{marginBottom: '0.4rem', color: 'var(--clr-primary)', borderColor: 'var(--clr-primary)', background: 'transparent'}}
-          onClick={() => onReset(u)}
-          disabled={busy}
-          aria-label={`Reset password for ${u.name}`}
+    <div className="uc">
+      {/* Top: avatar + name + role badge */}
+      <div className="uc-top">
+        <div
+          className="uc-avatar"
+          style={{ background: `linear-gradient(135deg, ${roleColor}bb, ${roleColor})` }}
+          aria-hidden="true"
         >
-          Reset PW
-        </button>
-        {canDelete ? (
-          <button
-            className="deactivate-btn"
-            onClick={() => onDelete(u)}
-            disabled={busy}
-            aria-label={`Delete ${u.name}`}
-          >
-            Delete
+          {u.name
+            ? u.name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
+            : '?'}
+        </div>
+        <div className="uc-identity">
+          <div className="uc-name">
+            {u.name}
+            {isSelf && <span className="uc-you">you</span>}
+          </div>
+          <div className="uc-email" title={u.email}>{u.email}</div>
+          <div style={{ fontSize: '0.68rem', fontFamily: 'monospace', color: 'var(--clr-text-muted)', marginTop: '0.15rem', letterSpacing: '0.04em' }}>
+            ID: #{u.id}
+          </div>
+        </div>
+        <span className="uc-badge" style={{ background: roleColor }}>{u.role}</span>
+      </div>
+
+      {/* Middle: role dropdown */}
+      <select
+        className="uc-select"
+        value={u.role}
+        onChange={(e) => onRoleChange(u.id, e.target.value)}
+        disabled={busy || isSelf}
+        aria-label="Change role"
+      >
+        <option value="CODER">Coder</option>
+        <option value="REVIEWER">Reviewer</option>
+        <option value="ADMIN">Admin</option>
+      </select>
+
+      {/* Bottom: actions + joined */}
+      <div className="uc-footer">
+        <div className="uc-actions">
+          <button className="uc-btn-ghost" onClick={() => onReset(u)} disabled={busy}>
+            Reset PW
           </button>
-        ) : (
-          <span className="inactive-badge" aria-label="Cannot delete your own account">Current</span>
-        )}
+          {isSelf ? (
+            <span className="uc-self">Current User</span>
+          ) : (
+            <button className="uc-btn-danger" onClick={() => onDelete(u)} disabled={busy}>
+              Delete
+            </button>
+          )}
+        </div>
+        <div className="uc-joined">Joined {new Date(u.created_at).toLocaleDateString()}</div>
       </div>
     </div>
   );
@@ -352,7 +366,9 @@ export default function UsersPage() {
     setError('');
     try {
       const res = await authApi.users();
-      setUsers(Array.isArray(res.data) ? res.data : []);
+      const list = Array.isArray(res.data) ? res.data : [];
+      console.log('Users API response:', list);
+      setUsers(list);
     } catch (e) {
       setError(e.response?.data?.detail || 'Failed to load users.');
     } finally {
@@ -364,9 +380,22 @@ export default function UsersPage() {
     setConfirm({
       user: u,
       title: 'Delete User',
-      message: `Are you sure you want to permanently delete "${u.name}" (${u.email})? This action cannot be undone.`,
+      message: `Permanently delete "${u.name}" (${u.email})? This cannot be undone.`,
     });
   }, []);
+
+  const handleRoleChange = useCallback(async (userId, newRole) => {
+    setBusyIds(s => new Set(s).add(userId));
+    try {
+      await authApi.updateRole(userId, newRole);
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u));
+      toast('User role updated.', 'success');
+    } catch (e) {
+      toast(e.response?.data?.detail || 'Role update failed.', 'error');
+    } finally {
+      setBusyIds(s => { const n = new Set(s); n.delete(userId); return n; });
+    }
+  }, [toast]);
 
   const confirmDelete = useCallback(async () => {
     if (!confirm) return;
@@ -375,18 +404,21 @@ export default function UsersPage() {
     setBusyIds(s => new Set(s).add(target.id));
     try {
       await authApi.deleteUser(target.id);
-      setUsers(prev => prev.filter(u => u.id !== target.id));
       toast(`${target.name} has been deleted.`, 'success');
+      // Always re-fetch from server — no local filtering
+      await fetchUsers();
     } catch (e) {
-      toast(e.response?.data?.detail || 'Deletion failed.', 'error');
+      console.error('USER DELETE ERROR:', e.response?.data || e.message);
+      toast(e.response?.data?.detail || 'Delete failed.', 'error');
     } finally {
       setBusyIds(s => { const n = new Set(s); n.delete(target.id); return n; });
     }
-  }, [confirm, toast]);
+  }, [confirm, toast, fetchUsers]);
 
-  const coderUsers = users.filter(u => u.role === 'CODER');
+  const coderUsers    = users.filter(u => u.role === 'CODER');
   const reviewerUsers = users.filter(u => u.role === 'REVIEWER');
-  const adminUsers = users.filter(u => u.role === 'ADMIN');
+  const adminUsers    = users.filter(u => u.role === 'ADMIN');
+
 
   const headerActions = (
     <button className="new-analysis-btn" onClick={() => setShowDrawer(true)} aria-label="Add new user">
@@ -406,74 +438,49 @@ export default function UsersPage() {
         />
 
         <div className="dashboard-content">
-          {error && (
-            <div className="error-banner" role="alert">
-              <span>⚠</span> {error}
-              <button className="error-banner-retry" onClick={fetchUsers}>Retry</button>
-            </div>
-          )}
+          <div style={{ maxWidth: '1200px', margin: '0 auto' }}> {/* STEP 14: EMPTY SPACE FIX */}
+            {error && (
+              <div className="error-banner" role="alert">
+                <span>⚠</span> {error}
+                <button className="error-banner-retry" onClick={fetchUsers}>Retry</button>
+              </div>
+            )}
 
-          {loading ? (
-            <div className="loading-center" role="status">
-              <div className="big-spinner" aria-hidden="true" /> Loading users…
-            </div>
-          ) : (
-            <>
-              <div className="users-section-title" aria-label="Coders">
-                Coders ({coderUsers.length})
+            {loading ? (
+              <div className="loading-center" role="status">
+                <div className="big-spinner" aria-hidden="true" /> Loading users…
               </div>
-              <div className="users-grid">
-                {coderUsers.length === 0 ? (
-                  <div style={{ color: 'var(--clr-text-muted)', fontSize: '0.82rem', padding: '1rem 0' }}>No coders found.</div>
-                ) : coderUsers.map(u => (
-                  <UserCard
-                    key={u.id}
-                    u={u}
-                    currentUser={currentUser}
-                    onDelete={handleDelete}
-                    onReset={setResetUser}
-                    busy={busyIds.has(u.id)}
-                  />
-                ))}
-              </div>
+            ) : (
+              <>
+                <div className="users-section-title">Coders ({coderUsers.length})</div>
+                <div className="users-grid">
+                  {coderUsers.length === 0 ? (
+                    <div style={{ color: 'var(--clr-text-muted)', fontSize: '0.82rem', padding: '1rem 0' }}>No coders found.</div>
+                  ) : coderUsers.map(u => (
+                    <UserCard key={u.id} u={u} currentUser={currentUser} onDelete={handleDelete} onReset={setResetUser} onRoleChange={handleRoleChange} busy={busyIds.has(u.id)} />
+                  ))}
+                </div>
 
-              <div className="users-section-title" style={{ marginTop: '2rem' }}>
-                Reviewers ({reviewerUsers.length})
-              </div>
-              <div className="users-grid">
-                {reviewerUsers.length === 0 ? (
-                  <div style={{ color: 'var(--clr-text-muted)', fontSize: '0.82rem', padding: '1rem 0' }}>No reviewers found.</div>
-                ) : reviewerUsers.map(u => (
-                  <UserCard
-                    key={u.id}
-                    u={u}
-                    currentUser={currentUser}
-                    onDelete={handleDelete}
-                    onReset={setResetUser}
-                    busy={busyIds.has(u.id)}
-                  />
-                ))}
-              </div>
+                <div className="users-section-title">Reviewers ({reviewerUsers.length})</div>
+                <div className="users-grid">
+                  {reviewerUsers.length === 0 ? (
+                    <div style={{ color: 'var(--clr-text-muted)', fontSize: '0.82rem', padding: '1rem 0' }}>No reviewers found.</div>
+                  ) : reviewerUsers.map(u => (
+                    <UserCard key={u.id} u={u} currentUser={currentUser} onDelete={handleDelete} onReset={setResetUser} onRoleChange={handleRoleChange} busy={busyIds.has(u.id)} />
+                  ))}
+                </div>
 
-              <div className="users-section-title" style={{ marginTop: '2rem' }}>
-                Admins ({adminUsers.length})
-              </div>
-              <div className="users-grid">
-                {adminUsers.length === 0 ? (
-                  <div style={{ color: 'var(--clr-text-muted)', fontSize: '0.82rem', padding: '1rem 0' }}>No admins found.</div>
-                ) : adminUsers.map(u => (
-                  <UserCard
-                    key={u.id}
-                    u={u}
-                    currentUser={currentUser}
-                    onDelete={handleDelete}
-                    onReset={setResetUser}
-                    busy={busyIds.has(u.id)}
-                  />
-                ))}
-              </div>
-            </>
-          )}
+                <div className="users-section-title">Admins ({adminUsers.length})</div>
+                <div className="users-grid">
+                  {adminUsers.length === 0 ? (
+                    <div style={{ color: 'var(--clr-text-muted)', fontSize: '0.82rem', padding: '1rem 0' }}>No admins found.</div>
+                  ) : adminUsers.map(u => (
+                    <UserCard key={u.id} u={u} currentUser={currentUser} onDelete={handleDelete} onReset={setResetUser} onRoleChange={handleRoleChange} busy={busyIds.has(u.id)} />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </main>
 

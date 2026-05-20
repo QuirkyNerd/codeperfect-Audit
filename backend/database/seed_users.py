@@ -1,64 +1,65 @@
 """
 backend/database/seed_users.py
-Seed script for CodePerfectAuditor to create initial demo users with appropriate roles.
+Simplified seed script: Only ensures a single master admin exists.
+Demo users are now handled dynamically via /demo-login.
 """
 
 import asyncio
-import os
-import sys
-
-# Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
-from backend.database.db import engine, async_session_maker, Base
-from backend.database.models import User, Organization
-from backend.security.auth import hash_password
+from sqlalchemy import select, delete
+from database.db import engine, AsyncSessionLocal
+from database.models import User, Organization, Base
+from security.auth import hash_password
 
 async def seed():
-    print("Seeding database...")
+    print("🌱 Initializing database...")
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async with async_session_maker() as session:
-        # Create Demo Org
-        org = Organization(name="Demo Hospital", domain="demo.com")
-        session.add(org)
-        await session.commit()
-        await session.refresh(org)
+    async with AsyncSessionLocal() as session:
+        # 1. Clean up old demo users (Isolated Demo Strategy)
+        await session.execute(delete(User).where(User.email.like('%demo%')))
+        await session.execute(delete(User).where(User.is_demo == True))
+        
+        # 2. Ensure Master Admin
+        admin_email = "admin@gmail.com"
+        admin_pass  = "admin2481"
+        
+        # Ensure Org
+        res_org = await session.execute(select(Organization).where(Organization.name == "CodePerfect Hospital"))
+        org = res_org.scalar_one_or_none()
+        if not org:
+            org = Organization(name="CodePerfect Hospital")
+            session.add(org)
+            await session.commit()
+            await session.refresh(org)
 
-        # Create Users
-        users = [
-            User(
-                org_id=org.id,
-                email="admin@demo.com",
-                hashed_password=hash_password("password123"),
-                name="Admin User",
+        # Ensure Admin
+        res_admin = await session.execute(select(User).where(User.email == admin_email))
+        admin = res_admin.scalar_one_or_none()
+
+        if not admin:
+            admin = User(
+                name="System Administrator",
+                email=admin_email,
+                password_hash=hash_password(admin_pass),
                 role="ADMIN",
-                is_active=True
-            ),
-            User(
                 org_id=org.id,
-                email="coder@demo.com",
-                hashed_password=hash_password("password123"),
-                name="Demo Coder",
-                role="CODER",
-                is_active=True
-            ),
-            User(
-                org_id=org.id,
-                email="reviewer@demo.com",
-                hashed_password=hash_password("password123"),
-                name="Demo Reviewer",
-                role="REVIEWER",
-                is_active=True
+                is_active=True,
+                is_demo=False
             )
-        ]
-
-        for user in users:
-            session.add(user)
+            session.add(admin)
+            print(f"✅ Master Admin created: {admin_email}")
+        else:
+            admin.role = "ADMIN"
+            admin.is_active = True
+            admin.is_demo = False
+            admin.password_hash = hash_password(admin_pass)
+            print(f"ℹ️ Master Admin verified")
 
         await session.commit()
-        print("Successfully seeded users (admin@demo.com, coder@demo.com, reviewer@demo.com). Password: password123")
+
+    print("🎉 Database initialization complete!")
 
 if __name__ == "__main__":
     asyncio.run(seed())

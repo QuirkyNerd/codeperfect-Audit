@@ -24,6 +24,7 @@ class AuditRequest(BaseModel):
         ...,
         description='ICD-10 / CPT codes entered by the human coder, e.g. ["I10", "E11.9"]',
     )
+    case_id: int | None = Field(None, description="Optional ID of an existing case to re-audit/update")
 
 
 # ── Code entries ──────────────────────────────────────────────────────────────

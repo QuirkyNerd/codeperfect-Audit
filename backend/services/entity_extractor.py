@@ -1,20 +1,18 @@
 """
-services/entity_extractor.py – Context-Aware Clinical Entity Extractor (v3 — FAANG-LEVEL).
+services/entity_extractor.py – Context-Aware Clinical Entity Extraction Engine.
 
-KEY UPGRADES in this version:
-  1. Section-aware parsing: handles PRINCIPAL DIAGNOSIS / SECONDARY DIAGNOSES sections
-  2. 600+ ontology with compound clinical entities (e.g., "acute systolic heart failure")
-  3. Hierarchical condition detection (CKD Stage 3, DM with neuropathy)
-  4. Negation detection with positional scope
-  5. Confidence is ALWAYS ≥ 0.95 for deterministic codes (never diluted)
-  6. RAG query strings generated per entity for targeted retrieval
+RESPONSIBILITIES:
+  1. Parses clinical notes into structured entities and anatomical regions.
+  2. Executes section-aware parsing (Principal vs. Secondary diagnoses).
+  3. Enforces hierarchical condition detection (e.g., CKD Stages, HF Subtypes).
+  4. Generates RAG query strings for targeted ontology retrieval.
 """
 
 import re
 from dataclasses import dataclass, field
 from typing import Literal
 try:
-    from backend.utils.logging import get_logger
+    from utils.logging import get_logger
 except ImportError:
     from utils.logging import get_logger
 
@@ -61,12 +59,11 @@ SYNONYM_MAP: dict[str, str] = {
     "elevated cholesterol": "hyperlipidemia",
     "mixed hyperlipidemia": "hyperlipidemia",
     # Other cardiovascular
-    "mi": "myocardial infarction",
-    "acute mi": "acute myocardial infarction",
-    "heart attack": "acute myocardial infarction",
-    "afib": "atrial fibrillation",
-    "af": "atrial fibrillation",
-    "afib": "atrial fibrillation",
+    "acute myocardial infarction": "acute myocardial infarction",
+    "stemi": "st elevation myocardial infarction",
+    "nstemi": "non-st elevation myocardial infarction",
+    "atrial fibrillation": "atrial fibrillation",
+    "atrial flutter": "atrial flutter",
     "cad": "coronary artery disease",
     "ihd": "ischemic heart disease",
     # Respiratory
@@ -123,6 +120,11 @@ SYNONYM_MAP: dict[str, str] = {
     "cva": "stroke",
     "cerebrovascular accident": "stroke",
     "tia": "transient ischemic attack",
+    # Task 51 Synonyms
+    "femoral neck": "neck of femur",
+    "hip fracture": "proximal femur fracture",
+    "hip fx": "proximal femur fracture",
+    "neck of femur fracture": "proximal femur fracture",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,6 +272,12 @@ MEDICAL_ONTOLOGY: dict[str, dict] = {
     "back pain": {"code": "M54.9", "type": "ICD-10", "description": "Dorsalgia, unspecified"},
     "fibromyalgia": {"code": "M79.3", "type": "ICD-10", "description": "Panniculitis"},
 
+    # ── Task 51: Specific Fracture Phrases ────────────────────────────────────
+    "displaced femoral neck fracture": {"code": "S72.009A", "type": "ICD-10", "description": "Displaced fracture of unspecified part of neck of femur, initial encounter"},
+    "nondisplaced femoral neck fracture": {"code": "S72.009D", "type": "ICD-10", "description": "Nondisplaced fracture of unspecified part of neck of femur, initial encounter"},
+    "intertrochanteric fracture": {"code": "S72.149A", "type": "ICD-10", "description": "Intertrochanteric fracture of unspecified femur, initial encounter"},
+    "subtrochanteric fracture": {"code": "S72.29XA", "type": "ICD-10", "description": "Subtrochanteric fracture of unspecified femur, initial encounter"},
+
     # ── INFECTIOUS ─────────────────────────────────────────────────────────────
     "sepsis": {"code": "A41.9", "type": "ICD-10", "description": "Sepsis, unspecified organism"},
     "septic shock": {"code": "A41.9", "type": "ICD-10", "description": "Sepsis with septic shock"},
@@ -368,12 +376,20 @@ FAMILY_HISTORY_TRIGGERS = [
 PAST_HISTORY_TRIGGERS = [
     "history of", "hx of", "past history of", "past medical history",
     "pmh of", "pmh:", "past medical history:", "previous", "prior history",
-    "old ", "resolved", "s/p ", "status post", "post-op for", "remote history of",
+    " old ", "resolved", "s/p ", "status post", "post-op for", "remote history of",
 ]
 
 SUSPECTED_TRIGGERS = [
     "possible ", "probable ", "likely ", "suspect ", "suspected ", "query ",
-    "presumed ", "suggestive of ", "cannot be excluded",
+    "presumed ", "suggestive of ", "cannot be excluded", "unlikely",
+    "low concern for", "investigate", "differential diagnosis", "differential",
+    "rule out", "evaluate for", "monitoring for"
+]
+
+DISCUSSION_TRIGGERS = [
+    "discussed ", "discussed with ", "patient asked ", "family asked ",
+    "screened for ", "screening for ", "ordered for ", "counselled on ",
+    "education on ", "risk of "
 ]
 
 # ── Clinical note section headers that contain active diagnoses ──────────────
@@ -387,20 +403,22 @@ ACTIVE_DIAGNOSIS_SECTIONS = [
 
 PROCEDURE_SECTIONS = [
     "procedure performed", "procedures performed", "operative procedure",
-    "procedure:", "procedures:", "surgical procedure", "operation performed",
+"procedure:", "procedures:", "surgical procedure", "operation performed",
 ]
 
 
 @dataclass
-class ClinicalEntity:
+class ExtractedEntity:
     entity: str
-    normalized: str
-    status: Literal["confirmed", "negated", "family_history", "suspected", "past_history"]
-    temporality: Literal["current", "past"]
-    evidence_sentence: str
-    ontology_code: dict | None = field(default=None)
-    section: str = ""
-    rag_query: str = ""  # Optimized entity-level RAG search string
+    section: str
+    status: Literal["confirmed", "denied", "uncertain", "history"] = "confirmed"
+    ontology_code: dict | None = None
+    confidence: float = 0.5
+    rag_query: str = ""
+    context: str = ""  # localized context (surrounding sentence)
+    sentence: str = ""  # exact sentence
+    section_weight: float = 1.0
+    temporal_context: str = "active"
 
 
 class EntityExtractor:
@@ -412,7 +430,7 @@ class EntityExtractor:
     """
 
     def __init__(self):
-        from services.group_config import (
+        from services.clinical_rules_config import (
             ENTITY_PREFIX_MAP,
             MANDATORY_GROUPS,
         )
@@ -420,8 +438,36 @@ class EntityExtractor:
         self._sorted_ontology = sorted(
             MEDICAL_ONTOLOGY.items(), key=lambda x: len(x[0]), reverse=True
         )
-        self.mandatory_groups = MANDATORY_GROUPS  # Store as instance attribute
-        logger.info("EntityExtractor v3: initialised with %d ontology entries.", len(MEDICAL_ONTOLOGY))
+        self.mandatory_groups = MANDATORY_GROUPS
+        self.entity_prefix_map = ENTITY_PREFIX_MAP
+        
+        # 🚨 TASK 14: Build a broad fallback ontology from ENTITY_PREFIX_MAP
+        # This ensures terms like 'fracture', 'fall', 'surgery' trigger RAG queries
+        self._fallback_keywords = sorted(
+            [k for k in ENTITY_PREFIX_MAP.keys() if len(k) > 3],
+            key=len,
+            reverse=True
+        )
+        
+        logger.info(
+            "EntityExtractor v4: initialised with %d primary + %d fallback keywords.",
+            len(MEDICAL_ONTOLOGY), len(self._fallback_keywords)
+        )
+        
+        # Task 51: Core diagnosis phrases that should NOT be split
+        self.core_phrases = [
+            "displaced femoral neck fracture",
+            "nondisplaced femoral neck fracture",
+            "intertrochanteric fracture",
+            "acute stemi",
+            "cabg surgery",
+            "total hip arthroplasty",
+            "total knee arthroplasty",
+            "acute kidney injury",
+            "chronic kidney disease",
+            "systolic heart failure",
+            "diastolic heart failure",
+        ]
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -440,7 +486,7 @@ class EntityExtractor:
         sections = self._parse_sections(note_text)
 
         # Step 2: Extract entities from each section with appropriate context
-        all_entities: list[ClinicalEntity] = []
+        all_entities: list[ExtractedEntity] = []
         for section_name, section_text in sections.items():
             is_active_dx = any(h in section_name for h in ACTIVE_DIAGNOSIS_SECTIONS)
             is_proc = any(h in section_name for h in PROCEDURE_SECTIONS)
@@ -450,46 +496,93 @@ class EntityExtractor:
         # Step 3: Fallback — scan full text sentence-by-sentence as well
         full_text_entities = self._extract_from_section(note_text, "full_text", force_confirmed=False)
         # Merge, avoiding duplicates
-        existing_normalized = {e.normalized for e in all_entities}
+        existing_normalized = {e.entity for e in all_entities}
         for e in full_text_entities:
-            if e.normalized not in existing_normalized:
+            if e.entity not in existing_normalized:
                 all_entities.append(e)
-                existing_normalized.add(e.normalized)
+                existing_normalized.add(e.entity)
 
-        confirmed = [e for e in all_entities if e.status in ("confirmed", "past_history", "suspected")]
-        excluded = [e for e in all_entities if e.status in ("negated", "family_history")]
+        confirmed = [e for e in all_entities if e.status in ("confirmed", "history")]
+        excluded = [e for e in all_entities if e.status in ("denied", "uncertain")]
 
-        # Step 4: Build deterministic codes — deduplicated
-        seen_codes: set[str] = set()
-        deterministic_codes: list[dict] = []
+        # Step 4: Build deterministic codes — ENCOUNTER-LEVEL AGGREGATION (Task 2)
+        code_aggregation: dict[str, dict] = {}
         rag_queries: list[str] = []
 
         for entity in confirmed:
+            if entity.rag_query:
+                rag_queries.append(entity.rag_query)
+
             if entity.ontology_code:
                 code = entity.ontology_code["code"]
-                if code not in seen_codes:
-                    seen_codes.add(code)
-                    # CRITICAL FIX: confidence is ALWAYS 0.95 for deterministic codes
-                    status_mult = 1.0 if entity.status == "confirmed" else 0.92
-                    deterministic_codes.append({
+                
+                # ── CONTEXT-AWARE CONFIDENCE HARDENING ──
+                base_conf = 0.95
+                generic_terms = {"pain", "hypertension", "diabetes", "ckd", "dvt", "hf", "anemia"}
+                if entity.entity in generic_terms or "unspecified" in entity.ontology_code.get("description", "").lower():
+                    base_conf = 0.75
+                    
+                section_lower = entity.section.lower()
+                is_high_authority = any(h in section_lower for h in ["principal", "primary", "assessment", "impression", "operative", "findings", "plan"])
+                
+                if is_high_authority:
+                    base_conf = min(0.98, base_conf + 0.15)
+                elif any(h in section_lower for h in ["history", "review of systems", "ros", "subjective"]):
+                    base_conf -= 0.15
+                
+                status_mult = 1.0
+                if entity.status == "history": status_mult = 0.85
+                elif entity.status == "uncertain": status_mult = 0.60
+                
+                final_conf = round(base_conf * status_mult, 3)
+
+                if code not in code_aggregation:
+                    code_aggregation[code] = {
                         "code": code,
                         "description": entity.ontology_code["description"],
                         "type": entity.ontology_code["type"],
-                        "confidence": round(0.95 * status_mult, 3),
+                        "confidence": final_conf,
                         "source": "deterministic",
-                        "entity": entity.normalized,
-                        "evidence_span": entity.evidence_sentence,
-                        "rationale": (
-                            f"Deterministically mapped via clinical ontology: "
-                            f"'{entity.entity}' → {code} ({entity.ontology_code['description']})"
-                        ),
-                        # Score components (no dilution — det always 0.95)
-                        "det_score": 0.95,
+                        "entity": entity.entity,
+                        "evidence_span": entity.sentence,
+                        "sections": {entity.section},
+                        "mentions_count": 1,
+                        "high_authority_mentions": 1 if is_high_authority else 0,
+                        "rationale": f"Ontology hit: '{entity.entity}' in {entity.section}",
+                        "det_score": final_conf,
                         "rag_score": 0.0,
                         "llm_score": 0.0,
                         "section": entity.section,
-                    })
-                    rag_queries.append(entity.rag_query or entity.normalized)
+                        "all_evidence": [f"[{entity.section}] {entity.sentence}"]
+                    }
+                else:
+                    # Aggregate evidence
+                    agg = code_aggregation[code]
+                    agg["sections"].add(entity.section)
+                    agg["mentions_count"] += 1
+                    if is_high_authority: agg["high_authority_mentions"] += 1
+                    agg["confidence"] = max(agg["confidence"], final_conf)
+                    agg["det_score"] = max(agg["det_score"], final_conf)
+                    agg["all_evidence"].append(f"[{entity.section}] {entity.sentence}")
+                    
+                    # Accumulation Logic (Task 2)
+                    # +0.05 for each additional unique section (max 0.15)
+                    # +0.02 for each additional mention (max 0.10)
+                    section_bonus = min(0.15, (len(agg["sections"]) - 1) * 0.05)
+                    mention_bonus = min(0.10, (agg["mentions_count"] - 1) * 0.02)
+                    
+                    agg["confidence"] = min(0.99, agg["confidence"] + section_bonus + mention_bonus)
+                    agg["det_score"] = agg["confidence"]
+                    agg["rationale"] = (
+                        f"Consolidated encounter evidence ({agg['mentions_count']} mentions across "
+                        f"{len(agg['sections'])} sections). High-authority hits: {agg['high_authority_mentions']}"
+                    )
+
+        # Final list conversion
+        deterministic_codes = list(code_aggregation.values())
+        # Convert sets to lists for JSON serializability
+        for c in deterministic_codes:
+            c["sections"] = list(c["sections"])
 
         logger.info(
             "EntityExtractor: confirmed=%d, excluded=%d, codes=%d, rag_queries=%d",
@@ -543,24 +636,44 @@ class EntityExtractor:
 
     def _extract_from_section(
         self, text: str, section_name: str, force_confirmed: bool = False
-    ) -> list[ClinicalEntity]:
+    ) -> list[ExtractedEntity]:
         """
         Extract entities from a section.
-        If force_confirmed, skips past-history check.
-
-        CRITICAL: Uses consumed-substring suppression to prevent duplicates:
-        - When compound term matches (e.g., "acute on chronic systolic heart failure"),
-          all simpler substring terms (e.g., "heart failure") are SUPPRESSED.
-        - When a specific code is produced, generic codes in same family are SUPPRESSED.
         """
+        # Task 51: Pre-scan for core clinical phrases before sentence splitting
+        # to ensure they are treated as atomic units.
+        found_core_phrases: list[str] = []
+        text_lower = text.lower()
+        
+        # Build regex for each phrase to allow intervening lateralities/common adjectives
+        # Example: "displaced femoral neck fracture" matches "displaced left femoral neck fracture"
+        for phrase in self.core_phrases:
+            words = phrase.split()
+            # Allow common medical modifiers between words
+            pattern = r'\b' + r'\b\s*(?:left|right|bilateral|chronic|acute|displaced|nondisplaced|major|minor)*\s*\b'.join([re.escape(w) for w in words]) + r'\b'
+            if re.search(pattern, text_lower):
+                found_core_phrases.append(phrase)
+
         sentences = self._split_sentences(text)
-        entities: list[ClinicalEntity] = []
+        entities: list[ExtractedEntity] = []
+        
+        # Task 51: Inject core phrases as virtual entities to trigger RAG queries
+        for phrase in found_core_phrases:
+            entities.append(ExtractedEntity(
+                entity=phrase,
+                section=section_name,
+                status="confirmed",
+                confidence=1.0,
+                rag_query=phrase,
+                context=phrase,
+                sentence=phrase
+            ))
+
         seen_terms_in_section: set[str] = set()    # canonical terms already matched
         seen_codes_in_section: set[str] = set()    # ICD codes already produced
 
         # ICD hierarchy: if specific code exists, suppress these generic ones
         CODE_SUPPRESSIONS = {
-            # If E11.42 matched -> suppress standalone neuropathy
             "E11.42": {"G62.9", "G60.9", "E11.9", "E11.40"},
             "E11.40": {"G62.9", "G60.9", "E11.9"},
             "E11.22": {"E11.9", "N18.9"},
@@ -578,13 +691,14 @@ class EntityExtractor:
 
         for sentence in sentences:
             sentence_lower = sentence.lower()
-            normalized_sentence = self._normalize_synonyms(sentence_lower)
+            normalized_sentence = " " + self._normalize_synonyms(sentence_lower) + " "
 
             # Context flags for the sentence
             is_negated_sent = any(neg in normalized_sentence for neg in NEGATION_TRIGGERS)
             is_family = any(fam in normalized_sentence for fam in FAMILY_HISTORY_TRIGGERS)
             is_past = not force_confirmed and any(past in normalized_sentence for past in PAST_HISTORY_TRIGGERS)
             is_suspected = any(sus in normalized_sentence for sus in SUSPECTED_TRIGGERS)
+            is_discussion = any(disc in normalized_sentence for disc in DISCUSSION_TRIGGERS)
 
             for canonical_term, ontology_entry in self._sorted_ontology:
                 if canonical_term not in normalized_sentence:
@@ -592,9 +706,6 @@ class EntityExtractor:
                 if canonical_term in seen_terms_in_section:
                     continue
 
-                # ── CONSUMED SUBSTRING SUPPRESSION ──
-                # If any already-matched term CONTAINS this term as a substring, skip it
-                # e.g., "heart failure" is a substring of "acute on chronic systolic heart failure"
                 is_consumed = False
                 for matched_term in seen_terms_in_section:
                     if canonical_term in matched_term and canonical_term != matched_term:
@@ -603,12 +714,10 @@ class EntityExtractor:
                 if is_consumed:
                     continue
 
-                # ── CODE-LEVEL SUPPRESSION ──
                 code = ontology_entry.get("code", "")
                 if code in seen_codes_in_section:
-                    continue  # exact code already produced
+                    continue
 
-                # Check if this code is suppressed by a more specific code
                 code_suppressed = False
                 for existing_code in seen_codes_in_section:
                     suppressions = CODE_SUPPRESSIONS.get(existing_code, set())
@@ -622,37 +731,34 @@ class EntityExtractor:
 
                 # Classify status
                 if is_family:
-                    status = "family_history"
+                    status = "uncertain"
                 elif self._negation_precedes(normalized_sentence, canonical_term, entity_pos):
-                    status = "negated"
+                    status = "denied"
                 elif force_confirmed:
                     status = "confirmed"
                 elif is_past and not is_negated_sent:
-                    status = "past_history"
-                elif is_suspected:
-                    status = "suspected"
+                    status = "history"
+                elif is_suspected or is_discussion:
+                    status = "uncertain"
                 else:
                     status = "confirmed"
 
-                temporality = "past" if (is_past or is_family) and not force_confirmed else "current"
-
-                # Generate targeted RAG query
                 rag_query = self._build_rag_query(canonical_term, ontology_entry)
 
-                entities.append(ClinicalEntity(
+                entities.append(ExtractedEntity(
                     entity=canonical_term,
-                    normalized=canonical_term,
-                    status=status,
-                    temporality=temporality,
-                    evidence_sentence=sentence.strip(),
-                    ontology_code=ontology_entry,
                     section=section_name,
+                    status=status,
+                    ontology_code=ontology_entry,
+                    confidence=1.0,
                     rag_query=rag_query,
+                    context=sentence.strip(),
+                    sentence=sentence.strip(),
+                    temporal_context="past" if (is_past or is_family) and not force_confirmed else "active"
                 ))
                 seen_terms_in_section.add(canonical_term)
                 seen_codes_in_section.add(code)
 
-                # Register all suppressions for this code
                 for suppress_code in CODE_SUPPRESSIONS.get(code, set()):
                     seen_codes_in_section.add(suppress_code)
 
@@ -661,35 +767,57 @@ class EntityExtractor:
             for keyword, fallback_entry in self.mandatory_groups.items():
                 if keyword in normalized_sentence:
                     # Only add if we haven't already extracted something that covers it
-                    # (e.g. if we already have "diabetes mellitus type 2", don't add "diabetes")
                     already_covered = any(keyword in term for term in seen_terms_in_section)
                     if not already_covered:
                         fallback_code = fallback_entry["code"]
                         if fallback_code not in seen_codes_in_section:
-                            # Context flags
-                            status = "confirmed"
-                            if is_family: status = "family_history"
-                            elif self._negation_precedes(normalized_sentence, keyword, normalized_sentence.find(keyword)): status = "negated"
-                            elif is_past and not is_negated_sent: status = "past_history"
-                            elif is_suspected: status = "suspected"
-                            
-                            temporality = "past" if (is_past or is_family) and not force_confirmed else "current"
+                            status = self._determine_status(normalized_sentence, keyword, is_family, is_past, force_confirmed, is_suspected, is_discussion)
                             rag_query = self._build_rag_query(keyword, fallback_entry)
                             
-                            entities.append(ClinicalEntity(
+                            entities.append(ExtractedEntity(
                                 entity=keyword,
-                                normalized=keyword,
-                                status=status,
-                                temporality=temporality,
-                                evidence_sentence=sentence.strip(),
-                                ontology_code=fallback_entry,
                                 section=section_name,
+                                status=status,
+                                ontology_code=fallback_entry,
+                                confidence=0.7,
                                 rag_query=rag_query,
+                                context=sentence.strip(),
+                                sentence=sentence.strip(),
+                                temporal_context="past" if (is_past or is_family) and not force_confirmed else "active"
                             ))
                             seen_terms_in_section.add(keyword)
                             seen_codes_in_section.add(fallback_code)
 
+            # 🚨 TASK 14: DEEP SIGNAL RECOVERY FALLBACK
+            # Use ENTITY_PREFIX_MAP to catch medical terms that aren't in MANDATORY_GROUPS
+            # but are known to the system.
+            for kw in self._fallback_keywords:
+                if kw in normalized_sentence:
+                    if not any(kw in term for term in seen_terms_in_section):
+                        status = self._determine_status(normalized_sentence, kw, is_family, is_past, force_confirmed, is_suspected, is_discussion)
+                        # Create a generic RAG-only entry
+                        entities.append(ExtractedEntity(
+                            entity=kw,
+                            section=section_name,
+                            status=status,
+                            confidence=0.5,
+                            rag_query=kw, # Query ChromaDB directly with the keyword
+                            context=sentence.strip(),
+                            sentence=sentence.strip()
+                        ))
+                        seen_terms_in_section.add(kw)
+
         return entities
+
+    def _determine_status(self, text: str, entity: str, is_family: bool, is_past: bool, force_confirmed: bool, is_suspected: bool, is_discussion: bool) -> str:
+        """Helper to unify status logic."""
+        pos = text.find(entity)
+        if is_family: return "uncertain"
+        if self._negation_precedes(text, entity, pos): return "denied"
+        if force_confirmed: return "confirmed"
+        if is_past: return "history"
+        if is_suspected or is_discussion: return "uncertain"
+        return "confirmed"
 
     def _build_rag_query(self, entity: str, ontology_entry: dict) -> str:
         """Build a targeted, entity-level RAG query string for maximum specificity."""
@@ -713,14 +841,15 @@ class EntityExtractor:
         return normalized
 
     @staticmethod
-    def _entity_to_dict(e: ClinicalEntity) -> dict:
+    def _entity_to_dict(e: ExtractedEntity) -> dict:
         return {
             "entity": e.entity,
-            "normalized": e.normalized,
-            "status": e.status,
-            "temporality": e.temporality,
-            "evidence_sentence": e.evidence_sentence,
-            "code": e.ontology_code["code"] if e.ontology_code else None,
             "section": e.section,
+            "status": e.status,
+            "ontology_code": e.ontology_code,
+            "confidence": e.confidence,
             "rag_query": e.rag_query,
+            "context": e.context,
+            "sentence": e.sentence,
+            "temporal_context": e.temporal_context
         }

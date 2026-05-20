@@ -1,27 +1,49 @@
 """
-services/rule_engine.py  –  Deterministic Clinical Rule Engine (v5).
+services/rule_engine.py – Deterministic Clinical Coding Rule Engine.
 
-Stages (called in order from audit_pipeline.py):
-  1. inject_deterministic_codes()   – merge deterministic codes into pool
-  2. apply_hierarchy_rules()        – ICD upgrade rules (pre-existing, kept)
-  3. apply_clinical_rules()         – NEW: diabetes hierarchy, symptom exclusion,
-                                      infection specificity, redundancy removal
-  4. apply_cpt_rules()              – NEW: CPT code validation and correction
-  5. apply_final_validation()       – NEW: dedup, invalid-combo removal, prefix cleanup
-
-All methods are pure static — no state, no side effects on input.
-All methods return a NEW list; callers must reassign:
-    ai_codes = RuleEngine.apply_clinical_rules(ai_codes, note_text)
+RESPONSIBILITIES:
+  1. Executes the 5-stage deterministic coding rule-set.
+  2. Enforces ICD-10 hierarchy upgrades and compound code injections.
+  3. Validates CPT-to-ICD coherence and mutual exclusivity.
+  4. Manages clinical specificity preservation via declarative rule-sets.
 """
 
 import copy
 import re
-try:
-    from backend.utils.logging import get_logger
-except ImportError:
-    from utils.logging import get_logger
+import logging
+from typing import Optional
+
+from utils.logging import get_logger
+from services.clinical_rules_config import (
+    COMPOUND_RULES,
+    CROSS_PREFIX_SUPPRESS,
+    HIERARCHY_SUPPRESSION,
+    MANDATORY_GROUPS,
+    ENTITY_PREFIX_MAP,
+)
+from services.validation_utils import (
+    is_negated,
+    has_prophylaxis_context,
+    compute_evidence_strength,
+    apply_specificity_hierarchy,
+    check_anatomy_consistency,
+    validate_procedure_evidence,
+    clinical_specificity_score,
+    SECTION_WEIGHTS,
+    LOW_PRIORITY_SECTIONS,
+    check_cross_diagnosis_conflicts,
+    ENCOUNTER_DOMAINS,
+    PROCEDURE_COHERENCE_FAMILIES,
+    is_generic_parent,
+    clean_rag_description,
+)
+from services.clinical_reasoning_engine import ClinicalReasoningEngine as _CRE
+from services.final_validator import run_final_validation as _run_final_validation
 
 logger = get_logger(__name__)
+
+# Singleton — avoid re-instantiating on every call
+_cre_instance = _CRE() if _CRE is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +72,9 @@ _INTEGRAL_SYMPTOMS: dict[str, list[str]] = {
     "R73.09": ["E11.9", "E11.21", "E11.22", "E11.40", "E11.42",
                "E11.65"],                                           # Hyperglycemia in DM
     "R41.3":  ["G30.9", "G31.9", "F01.51", "F03.90"],              # Memory impairment in dementia
+    "R52":    ["S", "M", "I", "J"],                                 # Generic pain suppressed by any S/M/I/J code (Precision v15)
+    "R10.9":  ["K", "N"],                                           # Abdominal pain suppressed by GI/Renal diagnosis
+    "R07.9":  ["I20", "I21", "I25", "I50"],                         # Chest pain suppressed by Cardiac diagnosis
 }
 
 # Mutually exclusive code pairs (keep higher specificity — second in pair wins)
@@ -150,37 +175,91 @@ class RuleEngine:
     @staticmethod
     def apply_hierarchy_rules(clinical_facts_str: str, ai_codes: list[dict]) -> list[dict]:
         """
-        Apply ICD hierarchy upgrade rules AFTER initial code set is assembled.
-        Original logic preserved — adds DM+neuropathy, DM+CKD, CPT-without-ICD,
-        Sepsis+Pneumonia injection rules.
+        Apply ICD hierarchy upgrade rules and SECONDARY REINFORCEMENT (Task 2).
         """
         processed = copy.deepcopy(ai_codes)
         facts_lower = clinical_facts_str.lower()
+        code_set = {c.get("code", "").upper() for c in processed}
+        
+        # ── HELPER: Identify Strongly Grounded Primary Domains ──────────
+        primary_grounding = {
+            "DM": any(c.get("code", "").startswith("E11") and c.get("confidence", 0) >= 0.90 for c in processed),
+            "CKD": any(c.get("code", "").startswith("N18") and c.get("confidence", 0) >= 0.90 for c in processed),
+            "HF": any(c.get("code", "").startswith("I50") and c.get("confidence", 0) >= 0.90 for c in processed),
+            "HTN": any(c.get("code", "").startswith("I10") and c.get("confidence", 0) >= 0.90 for c in processed),
+        }
 
         # Rule 1: DM2 + Neuropathy → E11.40
         has_dm2 = any(kw in facts_lower for kw in ["diabetes mellitus type 2", "t2dm", "dm2"])
-        has_neuropathy = "neuropathy" in facts_lower or "neuropathic" in facts_lower
+        has_neuropathy = any(kw in facts_lower for kw in ["neuropathy", "neuropathic", "nerve pain", "burning in feet"])
         if has_dm2 and has_neuropathy:
             for c in processed:
                 if c.get("code", "").upper() in ("E11.9", "E119"):
                     c["code"] = "E11.40"
                     c["description"] = "Type 2 diabetes mellitus with diabetic neuropathy, unspecified"
-                    c["rationale"] = (c.get("rationale", "") +
-                                      " [RULE: DM2+Neuropathy upgrade applied]")
-                    logger.info("RuleEngine: upgraded E11.9 -> E11.40 (DM2+Neuropathy)")
+                    c["confidence"] = max(c.get("confidence", 0), 0.92)
+                    c["rationale"] = (c.get("rationale", "") + " [RULE: DM2+Neuropathy upgrade]")
+                    logger.info("RuleEngine: upgraded E11.9 -> E11.40")
 
-        # Rule 2: DM2 + CKD → E11.22 (only if still E11.9)
-        has_ckd = any(kw in facts_lower for kw in [
-            "chronic kidney disease", "ckd", "renal disease", "nephropathy",
-        ])
+        # Rule 2: DM2 + CKD → E11.22
+        has_ckd = any(kw in facts_lower for kw in ["chronic kidney disease", "ckd", "renal disease", "gfr"])
         if has_dm2 and has_ckd:
             for c in processed:
                 if c.get("code", "").upper() in ("E11.9", "E119"):
                     c["code"] = "E11.22"
                     c["description"] = "Type 2 diabetes mellitus with diabetic CKD"
-                    c["rationale"] = (c.get("rationale", "") +
-                                      " [RULE: DM2+CKD upgrade applied]")
-                    logger.info("RuleEngine: upgraded E11.9 -> E11.22 (DM2+CKD)")
+                    c["confidence"] = max(c.get("confidence", 0), 0.92)
+                    c["rationale"] = (c.get("rationale", "") + " [RULE: DM2+CKD upgrade]")
+
+        # Rule 2.5: HTN + CKD → I12.9 (Task 6)
+        has_htn = any(kw in facts_lower for kw in ["hypertension", "htn", "high blood pressure"])
+        if has_htn and has_ckd:
+            found_htn = False
+            for c in processed:
+                if c.get("code", "").upper() == "I10":
+                    c["code"] = "I12.9"
+                    c["description"] = "Hypertensive chronic kidney disease with stage 1-4 CKD"
+                    c["confidence"] = max(c.get("confidence", 0), 0.92)
+                    c["rationale"] = (c.get("rationale", "") + " [RULE: HTN+CKD combination upgrade]")
+                    found_htn = True
+            
+            # If I12.9 was created or already exists, suppress generic CKD N18.9 if present
+            if found_htn or "I12.9" in code_set:
+                for c in processed:
+                    if c.get("code", "").upper() == "N18.9":
+                        c["confidence"] = 0.40 # Penalize instead of hard remove to allow other stages to win
+
+        # Rule 2.7: DM2 + Retinopathy → E11.319 (Task 6)
+        has_retinopathy = any(kw in facts_lower for kw in ["retinopathy", "macular edema", "retinal hemorrhage"])
+        if has_dm2 and has_retinopathy:
+            for c in processed:
+                if c.get("code", "").upper() in ("E11.9", "E119"):
+                    c["code"] = "E11.319"
+                    c["description"] = "Type 2 diabetes mellitus with unspecified diabetic retinopathy"
+                    c["confidence"] = max(c.get("confidence", 0), 0.92)
+                    c["rationale"] = (c.get("rationale", "") + " [RULE: DM2+Retinopathy upgrade]")
+
+        # ── SECONDARY REINFORCEMENT (Task 2) ─────────────────────────────
+        for c in processed:
+            code = c.get("code", "").upper()
+            
+            # Reinforce Diabetic Complications if DM is strong
+            if primary_grounding["DM"] and (code.startswith("E11.2") or code.startswith("E11.3") or code.startswith("E11.4")):
+                if c.get("confidence", 0) < 0.90:
+                    c["confidence"] = min(0.95, c["confidence"] + 0.15)
+                    c["rationale"] += " [REINFORCED: Primary DM strongly grounded]"
+            
+            # Reinforce CKD stages if CKD is strong
+            if primary_grounding["CKD"] and code.startswith("N18."):
+                 if c.get("confidence", 0) < 0.90:
+                    c["confidence"] = min(0.95, c["confidence"] + 0.10)
+                    c["rationale"] += " [REINFORCED: Primary CKD strongly grounded]"
+                    
+            # Reinforce HF manifestations if HF is strong
+            if primary_grounding["HF"] and code.startswith("I50."):
+                 if c.get("confidence", 0) < 0.90:
+                    c["confidence"] = min(0.95, c["confidence"] + 0.10)
+                    c["rationale"] += " [REINFORCED: Primary HF strongly grounded]"
 
         # Rule 3: CPT without ICD → lower confidence, flag
         has_cpt = any(c.get("type", "").upper() == "CPT" for c in processed)
@@ -237,6 +316,19 @@ class RuleEngine:
         if not ai_codes:
             return ai_codes
 
+        # ── PRE-FILTER: Clinical Reasoning Engine (prophylaxis + negation + evidence) ──
+        # This is the primary hallucination guard. It runs BEFORE clinical rules
+        # so that spurious codes (e.g. DVT from prophylaxis context) are eliminated
+        # before expensive hierarchy/mutex logic runs on them.
+        if _cre_instance is not None and note_text:
+            print(f"DEBUG RE: before cre: {ai_codes}")
+            ai_codes = _cre_instance.validate_codes(ai_codes, note_text)
+            print(f"DEBUG RE: after cre: {ai_codes}")
+            logger.info(
+                "RuleEngine[clinical]: ClinicalReasoningEngine passed %d codes to clinical rules",
+                len(ai_codes),
+            )
+
         processed = copy.deepcopy(ai_codes)
         note_lower = note_text.lower() if note_text else ""
         code_set = {c.get("code", "").upper() for c in processed}
@@ -274,11 +366,13 @@ class RuleEngine:
                     )
                 
                 if not independently_documented:
+                    # Generic Prefix Match (Precision v15)
                     for diag in diagnosing_codes:
-                        if diag in code_set:
+                        # Exact match OR prefix match (e.g. "S" prefix covers all injury codes)
+                        if any(c.startswith(diag) for c in code_set):
                             to_remove.add(symptom_code)
                             logger.info(
-                                "RuleEngine[clinical]: %s removed — integral to %s",
+                                "RuleEngine[clinical]: %s removed — integral to %s family",
                                 symptom_code, diag,
                             )
                             break
@@ -312,19 +406,69 @@ class RuleEngine:
             to_remove.add("B99.9")
             logger.info("RuleEngine[clinical]: B99.9 removed — specific infection code present")
 
-        # ── Rule 5: Mutex conflict resolver ───────────────────────────
-        for generic, specific in _MUTEX_PAIRS:
-            if generic in code_set and specific in code_set:
-                to_remove.add(generic)
-                logger.info(
-                    "RuleEngine[conflict]: removed generic %s — specific %s present",
-                    generic, specific,
-                )
+        # ── Rule 5: Clinical Specificity Guard (Generalized — Task 6) ─────────
+        # Automatically remove generic parents if a specific child exists in the pool.
+        # This replaces the hardcoded _MUTEX_PAIRS with a generalized approach.
+        families: dict[str, list[str]] = {}
+        for c in code_set:
+            pfx = c[:3]
+            if pfx not in families:
+                families[pfx] = []
+            families[pfx].append(c)
+
+        for pfx, sibling_codes in families.items():
+            if len(sibling_codes) <= 1:
+                continue
+            
+            # Specificity detection: if we have codes with length > 4 or more dots/digits, 
+            # and we have codes ending in .9 or .0, the .9/.0 are suspect.
+            specifics = [c for c in sibling_codes if not (c.endswith(".9") or c.endswith(".0") or len(c) == 3)]
+            if specifics:
+                for c in sibling_codes:
+                    if c.endswith(".9") or c.endswith(".0") or len(c) == 3:
+                        to_remove.add(c)
+                        logger.info("RuleEngine[specificity]: removing generic %s in favor of specific siblings %s", c, specifics)
+
+        # ── Rule 7: Refined Symptom Suppression (Task 10.3) ────────────────
+        # Suppress generic R-codes (Symptoms) if definitive A-Q codes are present,
+        # BUT only if the symptom is low-confidence or lacks direct textual support.
+        has_definitive = any(c[0] >= 'A' and c[0] <= 'Q' for c in code_set)
+        if has_definitive:
+            # Only suppress generic R-codes (length <= 5) that are not high-confidence
+            r_codes_to_check = [c for c in processed if c.get("code", "").startswith("R") and len(c.get("code", "")) <= 5]
+            for r_code_dict in r_codes_to_check:
+                r_code = r_code_dict.get("code", "").upper()
+                strength = float(r_code_dict.get("evidence_strength") or 0.5)
+                is_protected = r_code_dict.get("protected") or r_code_dict.get("source") == "deterministic"
+                
+                # Keep if protected, high-strength, or explicitly confirmed
+                if is_protected or strength >= 0.78:
+                    continue
+                
+                to_remove.add(r_code)
+                logger.info("RuleEngine[clinical]: Suppressing weak symptom code %s (strength %.2f) due to presence of definitive diagnoses", r_code, strength)
+
+        # ── Rule 8: Clinical Believability Trim (Task 10.3) ────────────────
+        # Professional audits rarely have 15+ codes. Trim noisy tails.
+        # Task 10.3: Increased limit from 12 to 15 to recover secondary codes.
+        if len(processed) > 15:
+            # Sort by confidence + specificity + protected status
+            processed.sort(key=lambda x: (
+                x.get("protected", False) or x.get("source") == "deterministic",
+                x.get("confidence", 0),
+                len(x.get("code", ""))
+            ), reverse=True)
+            
+            trimmed = processed[:15]
+            removed_tail = [c.get("code") for c in processed[15:]]
+            logger.info("RuleEngine[trust]: Trimming noisy results from %d to 15. Removed: %s", len(processed), removed_tail)
+            processed = trimmed
 
         if to_remove:
             processed = [c for c in processed if c.get("code", "").upper() not in to_remove]
-            logger.info("RuleEngine[clinical]: removed %d codes: %s", len(to_remove), to_remove)
+            logger.info("RuleEngine[clinical]: removed %d codes total: %s", len(to_remove), to_remove)
 
+        print(f"DEBUG RE: returning from apply_clinical_rules: {processed}")
         return processed
 
     # ------------------------------------------------------------------
@@ -482,6 +626,12 @@ class RuleEngine:
         removed = len(ai_codes) - len(final_codes)
         if removed:
             logger.info("RuleEngine[final_validation]: cleaned %d codes, output %d", removed, len(final_codes))
+
+        # ── TERMINAL GATE: Final evidence validator ───────────────────────
+        # This is called with the note_text stored in the RuleEngine context.
+        # Because apply_final_validation is a static method without note_text,
+        # this gate is best applied via apply_clinical_rules (which has note_text).
+        # The gate in final_validator.py is exposed for direct use by audit_pipeline.
 
         return final_codes
 

@@ -6,6 +6,7 @@ export default function UploadNote({
   onChange = () => {},
   file = null,
   onFileSelected = () => {},
+  disabled = false,
 }) {
   const charCount   = value?.length || 0;
   const fileInputRef = useRef(null);
@@ -68,6 +69,7 @@ export default function UploadNote({
             }}
             onMouseEnter={e => e.target.style.background = 'rgba(16,185,129,0.2)'}
             onMouseLeave={e => e.target.style.background = 'rgba(16,185,129,0.1)'}
+            disabled={disabled}
           >
             ↑ Upload File
           </button>
@@ -89,6 +91,7 @@ export default function UploadNote({
             }}
             onMouseEnter={e => e.target.style.background = 'rgba(59,130,246,0.2)'}
             onMouseLeave={e => e.target.style.background = 'rgba(59,130,246,0.1)'}
+            disabled={disabled}
           >
             ↻ Load Sample
           </button>
@@ -109,6 +112,7 @@ export default function UploadNote({
           <button
             onClick={clearFile}
             style={{ background: 'none', border: 'none', color: 'var(--clr-danger)', cursor: 'pointer', fontSize: '0.8rem', fontFamily: 'inherit' }}
+            disabled={disabled}
             aria-label="Remove uploaded file"
           >
             ✕ Remove
@@ -123,6 +127,7 @@ export default function UploadNote({
             id="clinical-note-input"
             value={value}
             onChange={e => onChange(e.target.value)}
+            disabled={disabled}
             placeholder="Paste clinical documentation here…"
             rows={15}
             aria-label="Clinical note input"

@@ -17,8 +17,8 @@ v2 changes:
 
 from typing import Any
 try:
-    from backend.utils.logging import get_logger
-    from backend.utils.sentence_indexer import SentenceIndexer
+    from utils.logging import get_logger
+    from utils.sentence_indexer import SentenceIndexer
 except ImportError:
     from utils.logging import get_logger
     from utils.sentence_indexer import SentenceIndexer

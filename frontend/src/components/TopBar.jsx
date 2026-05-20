@@ -2,27 +2,79 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../main.jsx';
 import { useTheme } from '../main.jsx';
-import { Sun, Moon, ChevronDown, ChevronUp, LogOut } from 'lucide-react';
+import { clearAppState } from '../utils/demoUtils.js';
+import { Sun, Moon, ChevronDown, ChevronUp, LogOut, RefreshCw } from 'lucide-react';
+import { authApi } from '../services/api.js';
+import { ROLE_HOME } from '../main.jsx';
 
 const ROLE_LABELS = { ADMIN: 'Admin', CODER: 'Coder', REVIEWER: 'Reviewer' };
 
 const AVATAR_COLORS = {
-  ADMIN: 'linear-gradient(135deg, #ef4444, #dc2626)',
-  CODER: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+  ADMIN:    'linear-gradient(135deg, #10b981, #059669)',
+  CODER:    'linear-gradient(135deg, #10b981, #059669)',
   REVIEWER: 'linear-gradient(135deg, #10b981, #059669)',
 };
+
+export function FullPageLoader({ message = "Loading..." }) {
+  return (
+    <div className="full-screen-loader">
+      <div className="spinner" />
+      <p>{message}</p>
+    </div>
+  );
+}
 
 export default function TopBar({ pageTitle, pageSubtitle, actions }) {
   const { user, logout } = useAuth();
   const { theme, cycleTheme } = useTheme();
   const navigate = useNavigate();
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [isSwitching, setIsSwitching] = useState(false);
   const dropdownRef = useRef(null);
 
   const handleLogout = useCallback(() => {
     logout();
     navigate('/login');
   }, [logout, navigate]);
+
+  const isDemoSession = localStorage.getItem('demo_session') === 'true';
+
+  const switchRole = async (targetRole, retryCount = 0) => {
+    if (isSwitching && retryCount === 0) return;
+    setIsSwitching(true);
+    try {
+      // Remove ONLY auth keys — never touch 'theme' or 'demo_session'
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('user');
+      sessionStorage.clear();
+
+      // 2. Login as new role
+      const res = await authApi.demoLogin(targetRole.toLowerCase());
+      if (res.data && res.data.access_token) {
+        const { user, access_token } = res.data;
+        localStorage.setItem('access_token', access_token);
+        localStorage.setItem('user', JSON.stringify(user));
+        localStorage.setItem('demo_session', 'true');
+
+        // 3. Force full reload
+        window.location.href = ROLE_HOME[user.role] || '/';
+      }
+    } catch (e) {
+      if (retryCount < 1) {
+        console.warn('Switch failed, retrying...', e);
+        return switchRole(targetRole, retryCount + 1);
+      }
+      console.error('Role switch failed', e);
+      alert('Demo action failed. Please retry.');
+      setIsSwitching(false);
+    }
+  };
+
+  const resetDemo = () => {
+    clearAppState();
+    logout();
+    window.location.href = '/login';
+  };
 
   useEffect(() => {
     function handleClickOutside(e) {
@@ -54,11 +106,35 @@ export default function TopBar({ pageTitle, pageSubtitle, actions }) {
   const ThemeIcon = theme === 'dark' ? Moon : Sun;
 
   return (
-    <div className="topbar" role="banner">
+    <>
+      {isSwitching && <FullPageLoader message="Switching role..." />}
+      <div className="topbar" role="banner">
       <div className="topbar-left">
-        {pageTitle && <h1 className="main-title topbar-title">{pageTitle}</h1>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          {pageTitle && <h1 className="main-title topbar-title">{pageTitle}</h1>}
+          {isDemoSession && (
+            <span className="demo-badge">DEMO MODE</span>
+          )}
+        </div>
         {pageSubtitle && <p className="topbar-subtitle">{pageSubtitle}</p>}
       </div>
+
+      {/* SECTION 9 & 11: Top-Center Role Switch Bar */}
+      {isDemoSession && (
+        <div className="demo-role-selector">
+          {['CODER', 'REVIEWER', 'ADMIN'].map(r => (
+            <button
+              key={r}
+              data-role={r}
+              className={`demo-role-btn ${role === r ? 'active' : ''}`}
+              onClick={() => switchRole(r)}
+              disabled={role === r || isSwitching}
+            >
+              {ROLE_LABELS[r]}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="topbar-right">
         {actions && <div className="topbar-actions">{actions}</div>}
@@ -102,8 +178,14 @@ export default function TopBar({ pageTitle, pageSubtitle, actions }) {
           {dropdownOpen && (
             <div className="user-dropdown" role="menu">
               <div className="user-dropdown-header">
+                <div className="user-chip-avatar" style={{ background: AVATAR_COLORS[role] || AVATAR_COLORS.CODER, width: 40, height: 40, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1rem', fontWeight: 700, color: '#fff', marginBottom: '0.5rem' }}>
+                  {initials}
+                </div>
                 <div className="user-dropdown-name">{user?.name}</div>
                 <div className="user-dropdown-email">{user?.email}</div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--clr-text-muted)', marginTop: '0.2rem', fontFamily: 'monospace', letterSpacing: '0.03em' }}>
+                  {ROLE_LABELS[role]} &nbsp;·&nbsp; ID: #{user?.id ?? '—'}
+                </div>
               </div>
 
               <div className="user-dropdown-divider" />
@@ -116,13 +198,28 @@ export default function TopBar({ pageTitle, pageSubtitle, actions }) {
                   handleLogout();
                 }}
               >
-                <LogOut size={16} />
                 Sign Out
               </button>
+
+              {isDemoSession && (
+                <>
+                  <div className="user-dropdown-divider" />
+                  <button
+                    className="user-dropdown-item"
+                    style={{ color: 'var(--clr-danger)' }}
+                    onClick={resetDemo}
+                    disabled={isSwitching}
+                  >
+                    <RefreshCw size={16} />
+                    Reset Demo Environment
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
       </div>
     </div>
+    </>
   );
 }

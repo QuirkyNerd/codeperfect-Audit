@@ -5,18 +5,18 @@ import '../styles/sidebar.css';
 
 const NAV_ITEMS_BY_ROLE = {
   ADMIN:    [
-    { to: '/',          icon: '', label: 'Coding' },
-    { to: '/cases',     icon: '', label: 'Case History' },
-    { to: '/analytics', icon: '', label: 'Analytics' },
-    { to: '/users',     icon: '', label: 'Users' },
+    { to: '/case-history', icon: '', label: 'Case History' },
+    { to: '/analytics',    icon: '', label: 'Analytics' },
+    { to: '/evaluation',   icon: '', label: 'Evaluation' },
+    { to: '/users',        icon: '', label: 'Users' },
   ],
   CODER:    [
-    { to: '/',      icon: '', label: 'Coding' },
-    { to: '/cases', icon: '', label: 'Case History' },
+    { to: '/',             icon: '', label: 'Coding' },
+    { to: '/case-history', icon: '', label: 'Case History' },
   ],
   REVIEWER: [
-    { to: '/cases',     icon: '', label: 'Case History' },
-    { to: '/analytics', icon: '', label: 'Coding' },
+    { to: '/case-history', icon: '', label: 'Case History' },
+    { to: '/analytics',    icon: '', label: 'Analytics' },
   ],
 };
 

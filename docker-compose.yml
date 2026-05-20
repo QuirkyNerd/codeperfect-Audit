@@ -1,5 +1,4 @@
 services:
-
   backend:
     build:
       context: .
@@ -7,24 +6,31 @@ services:
     container_name: codeperfect_backend
     ports:
       - "8000:8000"
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload   
     env_file:
-      - .env
+      - .env.prod
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/codeperfect
-      REDIS_URL: redis://redis:6379/0
-      CHROMA_PERSIST_DIR: /app/chroma_store
-      CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173"]'
+      PYTHONPATH: /app
+      HOST: 0.0.0.0
+      PORT: "8000"
+    working_dir: /app/backend
+    # Production: no --reload, bind to all interfaces
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
     volumes:
-      - ./backend:/app/backend        
-      - chroma_data:/app/chroma_store
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
+      # ChromaDB fallback (production primary is Qdrant Cloud — this is a safety fallback only)
+      - chroma_data:/app/backend/backend/chroma_db
+      # HuggingFace model cache (persisted across container restarts)
+      - hf_cache:/app/.cache/huggingface
+      # Persistent PDF reports
+      - pdf_reports:/app/persistent/reports
+      # Ingestion checkpoints
+      - checkpoints:/app/backend/data/checkpoints
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
   frontend:
     image: node:20-alpine
     container_name: codeperfect_frontend
@@ -35,48 +41,15 @@ services:
     ports:
       - "3000:3000"
     environment:
-      VITE_API_URL: http://localhost:8000/api/v1
-      VITE_PROXY_TARGET: http://backend:8000
+      # Points to the Oracle VPS backend — used by the container-hosted frontend
+      VITE_API_URL: http://161.118.217.29:8000/api/v1
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
     depends_on:
       - backend
-    restart: unless-stopped
-
-
-  postgres:
-    image: postgres:15-alpine
-    container_name: codeperfect_postgres
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: codeperfect
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: codeperfect_redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
+    restart: always
 volumes:
-  postgres_data:
   chroma_data:
-  redis_data:
+  hf_cache:
+  pdf_reports:
+  checkpoints:
   frontend_node_modules:

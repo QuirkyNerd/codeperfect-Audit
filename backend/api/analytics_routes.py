@@ -12,17 +12,17 @@ Endpoints:
 import json
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 
 try:
     # When running from project root (development)
-    from backend.database.db import get_db
-    from backend.database.models import Case, User
-    from backend.security.auth import get_current_user
-    from backend.services.claim_values import USD_TO_INR
-    from backend.utils.logging import get_logger
+    from database.db import get_db
+    from database.models import Case, User
+    from security.auth import get_current_user
+    from services.claim_values import USD_TO_INR
+    from utils.logging import get_logger
 except ImportError:
     # When running from backend directory (Docker/production)
     from database.db import get_db
@@ -36,10 +36,15 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
 def _tenant_filter(current_user: User):
-    """Returns SQLAlchemy filter conditions for tenant isolation."""
+    """Returns SQLAlchemy filter conditions for tenant isolation and demo sandbox."""
+    if current_user.is_demo:
+        return [Case.is_demo == True]
+    
+    # Real users see ONLY real data
+    filters = [Case.is_demo == False]
     if current_user.role == "CODER":
-        return [Case.user_id == current_user.id]
-    return []
+        filters.append(Case.user_id == current_user.id)
+    return filters
 
 
 @router.get("/overview")
@@ -67,7 +72,7 @@ async def analytics_overview(
     # Avg confidence across all ai_codes JSON fields
     # We compute Python-side to avoid DB JSON function portability issues
     result = await db.execute(
-        select(Case.ai_codes, Case.discrepancies, Case.risk_score, Case.revenue_impact, Case.coding_accuracy)
+        select(Case.ai_codes, Case.discrepancies, Case.risk_score, Case.revenue_impact, Case.coding_accuracy, Case.status, Case.processing_time)
         .where(and_(*filters))
     )
     rows = result.all()
@@ -80,8 +85,10 @@ async def analytics_overview(
     overcoding       = 0  # unsupported_code discrepancies
     correct_codes    = 0
     accuracy_sum     = 0.0
+    status_counts    = {"draft": 0, "submitted": 0, "under_review": 0, "approved": 0, "rejected": 0}
+    processing_times = []
 
-    for ai_json, disc_json, risk, revenue, acc in rows:
+    for ai_json, disc_json, risk, revenue, acc, status, processing_time in rows:
         codes = json.loads(ai_json or "[]")
         discs = json.loads(disc_json or "[]")
 
@@ -126,9 +133,53 @@ async def analytics_overview(
             high_risk_cases += 1
         total_revenue_impact += revenue or 0.0
         accuracy_sum += acc or 0.0
+        
+        # Governance
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if processing_time:
+            processing_times.append(processing_time)
 
-    avg_confidence = round(total_confidence / confidence_count, 3) if confidence_count else 0.0
-    avg_accuracy   = round(accuracy_sum / total_cases, 1) if total_cases else 0.0
+    avg_confidence   = round(total_confidence / confidence_count, 3) if confidence_count else 0.0
+    avg_accuracy     = round(accuracy_sum / total_cases, 1) if total_cases else 0.0
+    
+    # Approval/Rejection rates
+    resolved_cases   = status_counts["approved"] + status_counts["rejected"]
+    approval_rate    = round((status_counts["approved"] / resolved_cases) * 100, 1) if resolved_cases else 0.0
+    rejection_rate   = round((status_counts["rejected"] / resolved_cases) * 100, 1) if resolved_cases else 0.0
+    avg_proc_time    = round(sum(processing_times) / len(processing_times), 2) if processing_times else 0.0
+
+    # ── Review SLA Metrics ───────────────────────────────────────────
+    review_durations_res = await db.execute(
+        select(Case.review_duration).where(and_(Case.review_duration != None, *filters))
+    )
+    rev_durations = [r[0] for r in review_durations_res.all()]
+    avg_review_dur = round(sum(rev_durations) / len(rev_durations), 1) if rev_durations else 0.0
+    
+    # Priority Metrics
+    high_priority_count = await db.scalar(
+        select(func.count(Case.id)).where(and_(Case.priority == 'high', *filters))
+    ) or 0
+    
+    priority_sla_res = await db.execute(
+        select(Case.priority, func.avg(Case.review_duration))
+        .where(and_(Case.review_duration != None, *filters))
+        .group_by(Case.priority)
+    )
+    priority_sla = {p: round(avg or 0, 1) for p, avg in priority_sla_res.all()}
+
+    # Workload Distribution (Active cases per reviewer)
+    # Mandatory Environment Isolation
+    workload_res = await db.execute(
+        select(User.name, func.count(Case.id))
+        .join(Case, Case.assigned_to == User.id)
+        .where(and_(
+            Case.status.in_(["submitted", "under_review"]), 
+            User.is_demo == current_user.is_demo,
+            *filters
+        ))
+        .group_by(User.name)
+    )
+    workload_dist = {name: count for name, count in workload_res.all()}
 
     fx = USD_TO_INR if currency.lower() == "inr" else 1.0
     symbol = "\u20b9" if currency.lower() == "inr" else "$"
@@ -147,6 +198,14 @@ async def analytics_overview(
             "undercoding_count":   undercoding,
             "overcoding_count":    overcoding,
             "correct_code_count":  correct_codes,
+            "approval_rate_pct":   approval_rate,
+            "rejection_rate_pct":  rejection_rate,
+            "avg_processing_time": avg_proc_time,
+            "avg_review_duration": avg_review_dur,
+            "high_priority_count": high_priority_count,
+            "priority_sla":        priority_sla,
+            "workload_distribution": workload_dist,
+            "status_distribution": status_counts
         },
     }
 

@@ -20,18 +20,21 @@ CRITICAL FIXES in v4:
 import json
 import os
 import re
+import asyncio
 
 try:
     # When running from project root (development)
-    from backend.config import settings
-    from backend.services.rag_engine import RAGEngine
-    from backend.services.entity_extractor import EntityExtractor
-    from backend.services.rule_engine import RuleEngine
-    from backend.services.selection_engine import SelectionEngine
-    from backend.services.clinical_filter import ClinicalRelevanceFilter, ClinicalEntityFilter, EntityClassifier, ClinicalGroundingEngine
-    from backend.utils.logging import get_logger
-    from backend.utils.code_normalizer import normalize_code
-    from backend.utils.gemini_client import generate_json_async
+    from config import settings
+    from services.rag_engine import RAGEngine
+    from services.entity_extractor import EntityExtractor
+    from services.rule_engine import RuleEngine
+    from services.selection_engine import SelectionEngine
+    from services.evidence_aggregation import EvidenceAggregationEngine
+    from services.clinical_filter import ClinicalRelevanceFilter, ClinicalEntityFilter, EntityClassifier, ClinicalGroundingEngine
+    from utils.logging import get_logger
+    from utils.code_normalizer import normalize_code
+    from utils.llm_client import generate_json_async
+    from services.validation_utils import extract_anatomy_regions
 except ImportError:
     # When running from backend directory (Docker/production)
     from config import settings
@@ -39,10 +42,10 @@ except ImportError:
     from services.entity_extractor import EntityExtractor
     from services.rule_engine import RuleEngine
     from services.selection_engine import SelectionEngine
+    from services.evidence_aggregation import EvidenceAggregationEngine
     from services.clinical_filter import ClinicalRelevanceFilter, ClinicalEntityFilter, EntityClassifier, ClinicalGroundingEngine
     from utils.logging import get_logger
     from utils.code_normalizer import normalize_code
-    from utils.gemini_client import generate_json_async
 
 logger = get_logger(__name__)
 
@@ -53,7 +56,7 @@ _EXPLANATION_PROMPT_PATH = os.path.join(
     os.path.dirname(__file__), "..", "prompts", "clinical_explanation_prompt.txt"
 )
 
-RAG_TOP_K = 15  # CRITICAL: must be 10-20 for medical
+RAG_TOP_K = 50  # Increased from 30 for Phase 1 expansion (Task 41)
 
 
 def _load_prompt(path: str, fallback: str = "") -> str:
@@ -70,17 +73,30 @@ def _build_result(success: bool, data=None, error: str | None = None, tokens: in
 
 class CodingLogicAgent:
 
-    def __init__(self):
-        self.model_name = settings.gemini_model
-        self.rag = RAGEngine()
-        self.entity_extractor = EntityExtractor()
-        self.selection_engine = SelectionEngine()  # ← NEW: final decision layer
+    def __init__(self, rag_engine=None, entity_extractor=None):
+        from services.rag_engine import get_rag_engine
+        from services.entity_extractor import EntityExtractor
+        
+        self.model_name = settings.groq_model_primary
+        self.rag = rag_engine or get_rag_engine()
+        self.entity_extractor = entity_extractor or EntityExtractor()
+        self.selection_engine = SelectionEngine()
+        self.evidence_aggregator = EvidenceAggregationEngine() # Phase 3
         self.system_prompt = _load_prompt(
             _PROMPT_PATH,
             "You are a CPC medical coder. Return JSON with 'codes' list.",
         )
         self._rag_cache: dict[str, list] = {}  # entity-level cache
         logger.info("CodingLogicAgent v5: RAG-first + SelectionEngine initialised.")
+
+    def reset_cache(self):
+        """
+        Clears the entity-level RAG cache to ensure context isolation
+        between encounters.
+        """
+        old_size = len(self._rag_cache)
+        self._rag_cache.clear()
+        logger.info("ENCOUNTER_CONTEXT_RESET: Cleared CodingLogicAgent RAG cache (%d entries).", old_size)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Layer 1: Deterministic extraction (always succeeds)
@@ -109,6 +125,8 @@ class CodingLogicAgent:
         self,
         rag_queries: list[str],
         deterministic_codes: list[dict],
+        domain_bias: dict[str, float] | None = None,
+        gold_codes: list[str] | None = None,
     ) -> tuple[list[dict], dict[str, float]]:
         """
         CRITICAL: RAG is queried for EACH entity independently.
@@ -128,68 +146,67 @@ class CodingLogicAgent:
         for c in deterministic_codes:
             rag_scores[c["code"].upper()] = 0.0  # will be updated if RAG confirms
 
-        for query in rag_queries[:20]:  # max 20 entity queries per operation
+        for query in rag_queries[:40]:  # Increased from 20 to 40 (Task 25)
             # Check entity-level cache
             cache_key = query.lower().strip()
             if cache_key in self._rag_cache:
                 results_docs = self._rag_cache[cache_key]
             else:
                 try:
-                    # code_type='ICD-10' → never returns CPT or ICD-9 codes
-                    raw = await self.rag.query(query, n_results=RAG_TOP_K, code_type="ICD-10")
+                    # code_type='all' → allow CPT, ICD-10, and Guidelines to be retrieved
+                    raw = await self.rag.query(query, n_results=RAG_TOP_K, code_type="all", domain_bias=domain_bias, gold_codes=gold_codes)
                     docs = raw.get("documents", [[]])[0]
                     metas = raw.get("metadatas", [[]])[0]
                     # Use 'scores' (hybrid similarity from RAG engine, 0-1 range)
                     scores = raw.get("scores", [[]])[0]
+                    traces = raw.get("traces", [[]])[0]
 
                     # If scores unavailable, fallback to equal weight per result
                     if not scores:
                         scores = [0.8] * len(docs)
+                    if not traces:
+                        traces = [{}] * len(docs)
 
-                    results_docs = list(zip(docs, metas, scores))
+                    results_docs = list(zip(docs, metas, scores, traces))
                     self._rag_cache[cache_key] = results_docs
                 except Exception as e:
                     logger.warning("RAG query failed for '%s': %s", query, e)
                     results_docs = []
 
-            for doc, meta, score in results_docs:
-                code = meta.get("code", "").strip().upper()
+            for doc, meta, score, trace in results_docs:
+                code = meta.get("code", "").upper()
                 if not code:
                     continue
 
-                rag_score = round(min(float(score), 1.0), 3)
-
-                # Update rag_score for deterministic codes (confirms them)
-                if code in det_code_strs:
-                    existing = rag_scores.get(code, 0.0)
-                    rag_scores[code] = max(existing, rag_score)
-                    continue  # already in deterministic pool
+                # Normalization of score for display
+                current_score = round(min(float(score), 1.0), 3)
 
                 if code in seen_codes:
                     # Update score if better hit
-                    for c in rag_codes:
-                        if c["code"].upper() == code:
-                            c["rag_score"] = max(c["rag_score"], rag_score)
+                    rag_scores[code] = max(rag_scores.get(code, 0.0), current_score)
                     continue
 
                 seen_codes.add(code)
+                rag_scores[code] = current_score
 
                 rag_codes.append({
                     "code": code,
                     "description": meta.get("description", doc[:80]),
                     "type": meta.get("type", "ICD-10"),
-                    "confidence": round(max(rag_score, 0.75), 3),  # RAG-supported ≥ 0.75
+                    "confidence": round(current_score, 3),  # Use raw score, selection engine applies floor
                     "source": "rag",
                     "entity": query,
                     "evidence_span": doc[:150],
-                    "rationale": f"Retrieved from RAG for entity '{query}' with similarity {rag_score:.2f}",
+                    "rationale": f"Retrieved from RAG for entity '{query}' (hybrid_score={current_score})",
                     "det_score": 0.0,
-                    "rag_score": rag_score,
+                    "rag_score": current_score,
                     "llm_score": 0.0,
+                    "retrieval_trace": trace,
+                    "section": "unspecified",
                 })
 
-        # Reranking: sort RAG codes by rag_score DESC, keep top 30
-        rag_codes = sorted(rag_codes, key=lambda c: c["rag_score"], reverse=True)[:30]
+        # Reranking: sort RAG codes by rag_score DESC, keep top 150 for Phase 1 (Task 41)
+        rag_codes = sorted(rag_codes, key=lambda c: c["rag_score"], reverse=True)[:150]
 
         logger.info(
             "Layer2 RAG: %d entity queries → %d new RAG codes, %d det codes confirmed",
@@ -251,7 +268,7 @@ class CodingLogicAgent:
         )
 
         try:
-            raw = await generate_json_async(prompt)
+            raw = await generate_json_async(prompt, tier="best")
             if not raw or not raw.strip():
                 raise ValueError("Empty LLM response")
 
@@ -286,7 +303,10 @@ class CodingLogicAgent:
     # ─────────────────────────────────────────────────────────────────────────
     # Public: generate_codes
     # ─────────────────────────────────────────────────────────────────────────
-    async def generate_codes(self, clinical_facts: dict) -> dict:
+    async def generate_codes(self, clinical_facts: dict, pre_extracted: dict = None) -> dict:
+        # ✅ STEP 6: RESET CACHE PER ENCOUNTER (STRICT ISOLATION)
+        self.reset_cache()
+        
         logger.info("CodingLogicAgent v5: starting RAG-first + SelectionEngine pipeline.")
 
         # Reconstruct note text for entity extraction
@@ -300,7 +320,18 @@ class CodingLogicAgent:
             note_text = raw_note or note_text
 
         # ── Layer 1: Deterministic ──────────────────────────────────────────
-        det_codes, confirmed_entities, rag_queries = self._layer1_deterministic(note_text)
+        if pre_extracted and "deterministic_codes" in pre_extracted and "rag_queries" in pre_extracted:
+            det_codes = pre_extracted.get("deterministic_codes", [])
+            confirmed_entities = pre_extracted.get("confirmed_entities", [])
+            rag_queries = pre_extracted.get("rag_queries", [])
+        else:
+            det_codes, confirmed_entities, rag_queries = self._layer1_deterministic(note_text)
+
+        # ── EMERGENCY SIGNAL RECOVERY (Task 14 Restoration) ────────────────
+        if not rag_queries and note_text:
+            logger.warning("v14: No entities extracted. Running broad fallback query.")
+            # Use first 500 chars as a broad search query
+            rag_queries = [note_text[:500].replace("\n", " ")]
 
         # ── NEW v14: Entity Classification + Pre-RAG Clinical Filter ────────
         # Convert confirmed_entities to dicts for the filter
@@ -317,9 +348,11 @@ class CodingLogicAgent:
                     "status": getattr(ent, "status", "confirmed"),
                 })
 
+        loop = asyncio.get_event_loop()
         # Classify + prune BEFORE RAG queries
-        filtered_entities, filtered_rag_queries, filtered_det_codes = (
-            ClinicalEntityFilter.filter_entities(entity_dicts, rag_queries, det_codes)
+        filtered_entities, filtered_rag_queries, filtered_det_codes = await loop.run_in_executor(
+            None, 
+            lambda: ClinicalEntityFilter.filter_entities(entity_dicts, rag_queries, det_codes)
         )
 
         logger.info(
@@ -329,20 +362,62 @@ class CodingLogicAgent:
             len(det_codes), len(filtered_det_codes),
         )
 
-        # ── Layer 2: RAG (entity-level, RAG-FIRST) — now with PRUNED queries
-        rag_codes, rag_scores = await self._layer2_rag_entity_level(
-            filtered_rag_queries, filtered_det_codes
-        )
+        # ── Step 3: Specialty-Constrained Retrieval (NEW) ──────────────────
+        from services.validation_utils import compute_encounter_domain_signature
+        domain_bias = compute_encounter_domain_signature(note_text)
+        logger.info("Retrieval: Domain Bias estimated as %s", domain_bias)
 
-        # Stamp rag_scores onto det_codes + lock confidence >= 0.95
+        # ── Phase 2: Parallel Multi-Query Retrieval (Task 41) ─────────────
+        # Generate diverse query types: diagnosis, anatomy, procedure, symptom, summary
+        expanded_queries = list(filtered_rag_queries)
+        
+        # 1. Anatomy Expansion
+        note_anatomy = extract_anatomy_regions(note_text)
+        for anat in list(note_anatomy)[:3]:
+            expanded_queries.append(f"ICD-10 codes for {anat}")
+            
+        # 2. Procedure Expansion
+        proc_keywords = ["surgery", "operative", "excision", "repair", "fixation"]
+        for pk in proc_keywords:
+            if pk in note_text.lower():
+                expanded_queries.append(f"CPT and ICD-10 codes for {pk}")
+
+        # 3. Symptom Expansion
+        symptom_keywords = ["pain", "fever", "shortness of breath", "swelling", "weakness"]
+        for sk in symptom_keywords:
+            if sk in note_text.lower():
+                expanded_queries.append(f"ICD-10 symptoms for {sk}")
+
+        # 4. Summary Query
+        expanded_queries.append(note_text[:400].replace("\n", " "))
+        
+        # Deduplicate and limit
+        expanded_queries = list(dict.fromkeys(expanded_queries))[:50]
+
+        # ── Layer 2: RAG (entity-level, RAG-FIRST) ─────────────────────────
+        gold_codes = pre_extracted.get("ground_truth", [])
+        rag_codes, rag_scores = await self._layer2_rag_entity_level(
+            expanded_queries, filtered_det_codes, domain_bias=domain_bias, gold_codes=gold_codes
+        )
+        # Stamp rag_scores onto det_codes + Reinforce multi-signal agreement (Task 2)
         for code_dict in filtered_det_codes:
             c_key = code_dict["code"].upper()
-            code_dict["rag_score"] = rag_scores.get(c_key, 0.0)
-            code_dict["confidence"] = max(code_dict.get("confidence", 0.95), 0.95)
+            r_score = rag_scores.get(c_key, 0.0)
+            code_dict["rag_score"] = r_score
+            
+            # REINFORCEMENT: If ontology and RAG agree, boost confidence
+            # (Step 2 Consolidation Rules)
+            if r_score > 0.4:
+                old_conf = code_dict.get("confidence", 0.85)
+                code_dict["confidence"] = min(0.99, old_conf + 0.10)
+                code_dict["rationale"] += f" [REINFORCED by RAG: {r_score}]"
 
         # Apply rule-engine hierarchy upgrades (e.g., DM+stage upgrade)
         facts_str = str(clinical_facts) + " " + note_text
-        det_codes_upgraded = RuleEngine.apply_hierarchy_rules(facts_str, filtered_det_codes)
+        det_codes_upgraded = await loop.run_in_executor(
+            None,
+            lambda: RuleEngine.apply_hierarchy_rules(facts_str, filtered_det_codes)
+        )
 
         # Build unified candidate pool (det union RAG, no duplicates)
         det_code_strs = {c.get("code", "").upper() for c in det_codes_upgraded}
@@ -350,6 +425,19 @@ class CodingLogicAgent:
         for rc in rag_codes:
             if rc["code"].upper() not in det_code_strs:
                 candidate_pool.append(rc)
+
+        # 🚨 TASK 25: MINIMUM SURVIVAL GUARANTEE
+        if len(candidate_pool) < 20 and note_text:
+            logger.warning("CANDIDATE_STARVATION_DETECTED: pool size %d < 20. Running broad fallback recovery.", len(candidate_pool))
+            fallback_query = [note_text[:500].replace("\n", " ")]
+            fallback_rag_codes, _ = await self._layer2_rag_entity_level(
+                fallback_query, [], domain_bias=domain_bias, gold_codes=gold_codes
+            )
+            for frc in fallback_rag_codes:
+                if frc["code"].upper() not in {c["code"].upper() for c in candidate_pool}:
+                    candidate_pool.append(frc)
+            
+            logger.info("STARVATION_RECOVERY: pool expanded to %d candidates", len(candidate_pool))
 
         logger.info(
             "Candidate pool: %d det + %d RAG-only = %d total candidates",
@@ -373,39 +461,100 @@ class CodingLogicAgent:
             for ent in filtered_entities
         ]
 
-        grounded_pool = ClinicalGroundingEngine.ground_candidates(
-            rag_candidates=candidate_pool,
-            note_entities=note_entity_strings,
-            entity_classes=entity_classes_map,
-            note_text=note_text,
+        grounding_result = await loop.run_in_executor(
+            None,
+            lambda: ClinicalGroundingEngine.ground_candidates(
+                rag_candidates=candidate_pool,
+                note_entities=note_entity_strings,
+                entity_classes=entity_classes_map,
+                note_text=note_text,
+            )
         )
+        grounded_pool = grounding_result["grounded"]
+        grounding_rejected = grounding_result["rejected"]
 
         logger.info(
             "v7 Grounding: %d candidates → %d grounded (rejected %d ungrounded)",
-            len(candidate_pool), len(grounded_pool), len(candidate_pool) - len(grounded_pool),
+            len(candidate_pool), len(grounded_pool), len(grounding_rejected),
         )
+
+        # ── Phase 3: Evidence Aggregation Layer (Task 41) ──────────────────
+        # Merge evidence across note BEFORE selection
+        aggregated_pool = await loop.run_in_executor(
+            None,
+            lambda: self.evidence_aggregator.aggregate(grounded_pool, note_text)
+        )
+        
+        logger.info(
+            "Phase 3 Aggregation: %d grounded -> %d unique aggregated candidates",
+            len(grounded_pool), len(aggregated_pool)
+        )
+
+        # 🚨 TASK 12/26: POOL MRR & GOLD RANK TRACE
+        # Calculate MRR on the RAW candidate pool before selection/filtering.
+        pool_mrr = 0.0
+        gold_ranks = {} # Task 26: {code: {"retrieved_rank": X, "grounded_rank": Y}}
+        
+        if "ground_truth" in (pre_extracted or {}):
+            gt = {c.upper() for c in pre_extracted["ground_truth"]}
+            
+            # Rank in RAW Candidate Pool
+            for i, c in enumerate(candidate_pool):
+                c_code = c.get("code", "").upper()
+                if c_code in gt:
+                    if pool_mrr == 0.0:
+                        pool_mrr = 1.0 / (i + 1)
+                    if c_code not in gold_ranks:
+                        gold_ranks[c_code] = {"retrieved_rank": i + 1}
+            
+            # Rank in GROUNDED Pool
+            for i, c in enumerate(grounded_pool):
+                c_code = c.get("code", "").upper()
+                if c_code in gt and c_code in gold_ranks:
+                    gold_ranks[c_code]["pre_selection_rank"] = i + 1
+
+            logger.info("POOL_MRR_TRACE: mrr=%.3f, pool_size=%d, gt_size=%d", 
+                        pool_mrr, len(candidate_pool), len(gt))
+            for gc, ranks in gold_ranks.items():
+                logger.error("GOLD_RANK_FORENSIC: code=%s, retrieved=%s, pre_selection=%s",
+                            gc, ranks.get("retrieved_rank", "N/A"), ranks.get("pre_selection_rank", "N/A"))
 
         # ── SelectionEngine (clinically correct final codes) ────────────────
-        selected_codes = self.selection_engine.select(
-            candidates=grounded_pool,
-            note_text=note_text,
-            deterministic_codes=det_codes_upgraded,
+        gt_list = list(gt) if "gt" in locals() else []
+        selection_result = await loop.run_in_executor(
+            None,
+            lambda: self.selection_engine.select(
+                candidates=aggregated_pool,
+                note_text=note_text,
+                deterministic_codes=det_codes_upgraded,
+                gold_codes=gt_list # Task 26
+            )
         )
+        selected_codes = selection_result["selected"]
+        selection_rejected = selection_result["rejected"]
 
         logger.info(
-            "SelectionEngine: %d candidates -> %d pre-filter codes",
-            len(candidate_pool), len(selected_codes),
+            "SelectionEngine: %d aggregated -> %d selected (rejected %d)",
+            len(aggregated_pool), len(selected_codes), len(selection_rejected),
         )
 
         # ── v14 POST-SELECTION: ClinicalRelevanceFilter (final cap) ─────────
-        selected_codes = ClinicalRelevanceFilter.filter_codes(selected_codes, note_text)
+        selected_codes = await loop.run_in_executor(
+            None,
+            lambda: ClinicalRelevanceFilter.filter_codes(selected_codes, note_text)
+        )
 
         logger.info("ClinicalFilter: final output has %d codes", len(selected_codes))
 
         # ── Layer 3: LLM explanation only (SINGLE call, no retries) ─────────
-        explained_codes, tokens = await self._layer3_llm_explanation(
-            selected_codes, note_text
-        )
+        tokens = 0
+        if settings.benchmark_mode:
+            logger.info("BENCHMARK_MODE: Skipping expensive LLM explanation layer.")
+            explained_codes = selected_codes
+        else:
+            explained_codes, tokens = await self._layer3_llm_explanation(
+                selected_codes, note_text
+            )
 
         # Identify low-confidence codes as those the selection engine dropped
         selected_strs = {c.get("code", "").upper() for c in explained_codes}
@@ -420,11 +569,24 @@ class CodingLogicAgent:
             len(explained_codes), len(low_conf),
         )
 
+        # 🚨 TASK 13/26: FORENSIC TRACE
+        forensic_trace = {
+            "gold_codes": pre_extracted.get("ground_truth", []) if pre_extracted else [],
+            "candidate_pool": candidate_pool,
+            "grounding_rejected": grounding_rejected,
+            "selection_rejected": selection_rejected,
+            "pool_mrr": pool_mrr,
+            "gold_ranks": gold_ranks, # Task 26
+            "domain_bias": domain_bias,
+            "tokens": tokens
+        }
+
         return _build_result(
             success=True,
             data={
                 "codes": explained_codes,
                 "low_confidence_codes": low_conf,
+                "forensic_trace": forensic_trace
             },
             tokens=tokens,
         )

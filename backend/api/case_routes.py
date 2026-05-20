@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
+from sqlalchemy.orm import selectinload
 
 try:
     # When running from project root (development)
@@ -44,12 +45,15 @@ def _case_to_dict(c: Case) -> dict:
         if isinstance(summary_data, dict):
             summary_text = summary_data.get("summary", "")
             explanation_text = summary_data.get("explanation", "")
+            removed_codes = summary_data.get("removed_codes", [])
         else:
             summary_text = c.summary
             explanation_text = ""
+            removed_codes = []
     except Exception:
         summary_text = c.summary
         explanation_text = ""
+        removed_codes = []
 
     return {
         "id":              c.id,
@@ -68,10 +72,14 @@ def _case_to_dict(c: Case) -> dict:
         "processing_time": c.processing_time,
         "summary":         summary_text,
         "explanation":     explanation_text,
+        "removed_codes":   removed_codes,
         "status":            c.status,
         "model_used":        c.model_used,
         "tokens_used":       c.tokens_used,
         "cost_estimate":     c.cost_estimate,
+        "priority":          c.priority,
+        "assignment_status": c.assignment_status,
+        "reviewer_name":     c.reviewer.name if hasattr(c, "reviewer") and c.reviewer else "Unassigned",
 
         "created_at":        c.created_at.isoformat() if c.created_at else None,
     }
@@ -95,10 +103,15 @@ async def list_cases(
     """
     filters = []
 
-    # Tenant isolation
+    # Step 1: Mandatory Environment Isolation
+    mode = "DEMO" if current_user.is_demo else "PRODUCTION"
+    filters.append(Case.is_demo == current_user.is_demo)
+    logger.info("CASE_QUERY_MODE: %s (user=%s)", mode, current_user.email)
+
+    # Step 2: Tenant isolation within the environment
     if current_user.role == "CODER":
         filters.append(Case.user_id == current_user.id)
-    # ADMIN and REVIEWER see ALL cases.
+    # ADMIN and REVIEWER see ALL cases in their environment.
 
     if status:
         filters.append(Case.status == status)
@@ -126,7 +139,9 @@ async def list_cases(
         total     = await db.scalar(count_query) or 0
         offset    = (page - 1) * page_size
         result    = await db.execute(
-            base_query.order_by(Case.created_at.asc()).offset(offset).limit(page_size)
+            base_query.options(selectinload(Case.reviewer))
+            .order_by(Case.created_at.asc())
+            .offset(offset).limit(page_size)
         )
         cases     = result.scalars().all()
 
@@ -135,7 +150,7 @@ async def list_cases(
         raise HTTPException(status_code=500, detail=str(e))
 
     print("CURRENT USER:", current_user.id, current_user.role)
-    print("CASES RETURNED:", len(cases))
+    logger.info("CASES_RETURNED: %d", len(cases))
 
     return {
         "total":     total,
@@ -157,7 +172,13 @@ async def get_case(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found.")
 
-    # Access control
+    # Step 1: Mandatory Environment Isolation Check
+    if case.is_demo != current_user.is_demo:
+        logger.warning("ISOLATION_BREACH_ATTEMPT: user=%s (is_demo=%s) tried to access case=%d (is_demo=%s)",
+                       current_user.email, current_user.is_demo, case_id, case.is_demo)
+        raise HTTPException(status_code=403, detail="Forbidden: Environment mismatch.")
+
+    # Step 2: Role-based access control
     if current_user.role == "CODER" and case.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied.")
 
@@ -181,6 +202,12 @@ async def update_case_status(
     case   = result.scalar_one_or_none()
     if not case:
         raise HTTPException(status_code=404, detail="Case not found.")
+
+    # Mandatory Environment Isolation Check
+    if case.is_demo != current_user.is_demo:
+        logger.warning("ISOLATION_BREACH_ATTEMPT (Update): user=%s (is_demo=%s) tried to update case=%d (is_demo=%s)",
+                       current_user.email, current_user.is_demo, case_id, case.is_demo)
+        raise HTTPException(status_code=403, detail="Forbidden: Environment mismatch.")
 
     case.status           = payload.status
     case.updated_at       = datetime.utcnow()

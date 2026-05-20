@@ -1,291 +1,160 @@
 """
-services/clinical_rules_config.py — SPECIAL-CASE OVERRIDES ONLY (v2.0)
+services/clinical_rules_config.py – Master Declarative Clinical Rules and Constants.
 
-DESIGN PRINCIPLE:
-  The SelectionEngine derives 90% of its rules AUTOMATICALLY from ICD-10 structure:
-    - Prefix hierarchy: N18.32 automatically suppresses N18.3, N18. → group "N18"
-    - Combination code dominance: compound codes auto-suppress their components
-    - Auto-grouping: first 3 chars of ICD code = group key
-
-  This file provides OVERRIDES for cases the auto-engine cannot infer:
-    - Clinical exclusivity (E10.* must not appear when E11.x is confirmed)
-    - Cross-prefix suppression (E11.42 suppresses G62.9 — different prefix families)
-    - Explicit compound condition mappings (DM2 + neuropathy → E11.42)
-    - Category hard-rejects (pregnancy codes when no pregnancy entity)
-    - Known noise patterns (nephrotic syndrome leaking into CKD queries)
-
-ADDING NEW RULES: just append to the appropriate section.
-NO code changes to selection_engine.py are needed.
+RESPONSIBILITIES:
+  1. Declarative definition of compound/combination clinical rules.
+  2. Clinical exclusivity and hard-rejection prefix mappings.
+  3. Entity-to-prefix coverage validation maps.
+  4. Mandatory clinical group definitions for fallback stability.
 """
-
-from __future__ import annotations
-import re as _re
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# UTILITY — clean RAG document text that leaks "Code: E109 | Description: ..."
-# Call on the `doc` / description field from ChromaDB before presenting.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def clean_rag_description(raw: str) -> str:
-    """Strip 'Code: XX | Description: ' noise from ChromaDB document text."""
-    # Remove patterns like "Code: E11.9 | Description: " or "Code: E11.9 |"
-    cleaned = _re.sub(r"(?i)code:\s*[A-Z0-9.]+\s*\|?\s*(?:description:)?\s*", "", raw)
-    # Remove leading/trailing whitespace and pipes
-    cleaned = cleaned.strip().strip("|").strip()
-    return cleaned if cleaned else raw.strip()
-
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COMPOUND RULES — Declarative condition-pair → result code
 # ─────────────────────────────────────────────────────────────────────────────
-# Fields:
-#   id:           unique identifier
-#   entity_signals: any of these phrases must appear in note (normalized, case-insensitive)
-#                   uses partial matching (e.g. "neuropath" matches "neuropathy"/"neuropathic")
-#   entity_all:   ALL of these must be present (AND logic across entries)
-#   trigger_prefixes: at least one code from these prefixes must be in candidate pool
-#   result:       ICD-10 code to inject (goes into PROTECTED set)
-#   result_desc:  human-readable description
-#   result_group: group key for this result (= first 3 chars of result code normally)
-#   priority:     higher = evaluated first (0-10)
-#   eliminate_prefixes: remove ALL codes with these prefixes (unless protected)
-#   eliminate_codes:    remove these exact codes (unless protected)
-
 COMPOUND_RULES: list[dict] = [
-    # ── DIABETES TYPE 2 COMPLICATIONS ────────────────────────────────────────
-
     {
         "id": "DM2_PERIPHERAL_NEUROPATHY",
-        "entity_all": ["diabet", "neuropath"],         # "neuropathy", "neuropathic"
-        "entity_signals": ["type 2", "t2dm", "dm2", "dm 2"],
-        "trigger_prefixes": ["E11"],
-        "result": "E11.42",
-        "result_desc": "Type 2 diabetes mellitus with diabetic peripheral neuropathy, unspecified",
-        "result_group": "E11",
-        "priority": 10,
-        "eliminate_prefixes": ["G57", "G58", "G59", "G60", "G61", "G62", "G63", "G64"],
-        "eliminate_codes": ["E11.9", "E11.40", "E11.41", "E11.638", "E11.628", "E11.49", "E13.8"],
+        "conditions": ["type 2", "diabet", "neuropath"],
+        "code": "E11.42",
+        "desc": "Type 2 diabetes mellitus with diabetic peripheral neuropathy, unspecified",
+        "suppresses": ["G57", "G58", "G59", "G60", "G61", "G62", "G63", "G64", "E11.9", "E11.40", "E11.41", "E11.638", "E11.628", "E11.49", "E13.8"],
+        "covers_groups": ["neuropathy", "diabet", "dm2", "type 2 diabetes"]
     },
     {
         "id": "DM2_MONONEUROPATHY",
-        "entity_all": ["diabet", "mononeuropath"],
-        "entity_signals": ["type 2", "t2dm", "dm2"],
-        "trigger_prefixes": ["E11"],
-        "result": "E11.41",
-        "result_desc": "Type 2 diabetes mellitus with diabetic mononeuropathy",
-        "result_group": "E11",
-        "priority": 9,
-        "eliminate_prefixes": ["G57", "G58"],
-        "eliminate_codes": ["E11.9", "E11.40"],
+        "conditions": ["type 2", "diabet", "mononeuropath"],
+        "code": "E11.41",
+        "desc": "Type 2 diabetes mellitus with diabetic mononeuropathy",
+        "suppresses": ["G57", "G58", "E11.9", "E11.40"],
+        "covers_groups": ["neuropathy", "diabet", "dm2"]
     },
     {
         "id": "DM2_CKD",
-        "entity_all": ["diabet", "chronic kidney"],
-        "entity_signals": ["type 2", "t2dm", "dm2", "dm 2"],
-        "trigger_prefixes": ["E11", "N18"],
-        "result": "E11.22",
-        "result_desc": "Type 2 diabetes mellitus with diabetic chronic kidney disease",
-        "result_group": "E11",
-        "priority": 8,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["E11.65", "E11.9"],
+        "conditions": ["type 2", "diabet", "chronic kidney"],
+        "code": "E11.22",
+        "desc": "Type 2 diabetes mellitus with diabetic chronic kidney disease",
+        "suppresses": ["E11.65", "E11.9"],
+        "requires_additional_codes": ["N18"],
+        "covers_groups": ["ckd", "chronic kidney", "diabet", "dm2"]
     },
     {
         "id": "DM2_NEPHROPATHY",
-        "entity_all": ["diabet", "nephropath"],
-        "entity_signals": ["type 2", "t2dm"],
-        "trigger_prefixes": ["E11"],
-        "result": "E11.21",
-        "result_desc": "Type 2 diabetes mellitus with diabetic nephropathy",
-        "result_group": "E11",
-        "priority": 8,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["E11.9"],
+        "conditions": ["type 2", "diabet", "nephropath"],
+        "code": "E11.21",
+        "desc": "Type 2 diabetes mellitus with diabetic nephropathy",
+        "suppresses": ["E11.9"],
+        "covers_groups": ["nephropathy", "diabet", "dm2"]
     },
     {
         "id": "DM2_RETINOPATHY_BACKGROUND",
-        "entity_all": ["diabet", "retinopathy"],
-        "entity_signals": ["background", "mild", "moderate", "without macular"],
-        "trigger_prefixes": ["E11"],
-        "result": "E11.319",
-        "result_desc": "Type 2 diabetes mellitus with unspecified diabetic retinopathy without macular edema",
-        "result_group": "E11",
-        "priority": 7,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["E11.9", "E11.31", "E11.39"],
+        "conditions": ["diabet", "retinopathy", "background"],
+        "code": "E11.319",
+        "desc": "Type 2 diabetes mellitus with unspecified diabetic retinopathy without macular edema",
+        "suppresses": ["E11.9", "E11.31", "E11.39"],
+        "covers_groups": ["retinopathy", "diabet", "dm2"]
     },
     {
         "id": "DM2_FOOT_ULCER",
-        "entity_all": ["diabet", "foot ulcer"],
-        "entity_signals": ["type 2", "t2dm"],
-        "trigger_prefixes": ["E11"],
-        "result": "E11.621",
-        "result_desc": "Type 2 diabetes mellitus with foot ulcer",
-        "result_group": "E11",
-        "priority": 7,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["E11.9", "E11.62"],
+        "conditions": ["type 2", "diabet", "foot ulcer"],
+        "code": "E11.621",
+        "desc": "Type 2 diabetes mellitus with foot ulcer",
+        "suppresses": ["E11.9", "E11.62"],
+        "covers_groups": ["ulcer", "foot ulcer", "diabet", "dm2"]
     },
-
-    # ── HEART FAILURE SUBTYPES ────────────────────────────────────────────────
-
     {
         "id": "HF_ACUTE_ON_CHRONIC_SYSTOLIC",
-        "entity_all": ["acute on chronic systolic"],
-        "entity_signals": ["heart failure", "cardiac failure"],
-        "trigger_prefixes": ["I50"],
-        "result": "I50.23",
-        "result_desc": "Acute on chronic systolic (congestive) heart failure",
-        "result_group": "I50",
-        "priority": 10,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["I50.9", "I50.20", "I50.21", "I50.40", "I50.41", "I50.43"],
+        "conditions": ["acute on chronic systolic", "heart failure"],
+        "code": "I50.23",
+        "desc": "Acute on chronic systolic (congestive) heart failure",
+        "suppresses": ["I50.9", "I50.20", "I50.21", "I50.40", "I50.41", "I50.43"],
+        "covers_groups": ["heart failure", "chf"]
     },
     {
         "id": "HF_ACUTE_ON_CHRONIC_DIASTOLIC",
-        "entity_all": ["acute on chronic diastolic"],
-        "entity_signals": ["heart failure"],
-        "trigger_prefixes": ["I50"],
-        "result": "I50.33",
-        "result_desc": "Acute on chronic diastolic (congestive) heart failure",
-        "result_group": "I50",
-        "priority": 10,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["I50.9", "I50.30", "I50.31", "I50.40", "I50.41"],
+        "conditions": ["acute on chronic diastolic", "heart failure"],
+        "code": "I50.33",
+        "desc": "Acute on chronic diastolic (congestive) heart failure",
+        "suppresses": ["I50.9", "I50.30", "I50.31", "I50.40", "I50.41"],
+        "covers_groups": ["heart failure", "chf"]
     },
     {
         "id": "HF_ACUTE_SYSTOLIC",
-        "entity_all": ["acute systolic"],
-        "entity_signals": ["heart failure"],
-        "trigger_prefixes": ["I50"],
-        "result": "I50.21",
-        "result_desc": "Acute systolic (congestive) heart failure",
-        "result_group": "I50",
-        "priority": 9,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["I50.9", "I50.20", "I50.40", "I50.43"],
+        "conditions": ["acute systolic", "heart failure"],
+        "code": "I50.21",
+        "desc": "Acute systolic (congestive) heart failure",
+        "suppresses": ["I50.9", "I50.20", "I50.40", "I50.43"],
+        "covers_groups": ["heart failure", "chf"]
     },
     {
         "id": "HF_CHRONIC_SYSTOLIC",
-        "entity_all": ["chronic systolic"],
-        "entity_signals": ["heart failure"],
-        "trigger_prefixes": ["I50"],
-        "result": "I50.22",
-        "result_desc": "Chronic systolic (congestive) heart failure",
-        "result_group": "I50",
-        "priority": 8,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["I50.9", "I50.20"],
+        "conditions": ["chronic systolic", "heart failure"],
+        "code": "I50.22",
+        "desc": "Chronic systolic (congestive) heart failure",
+        "suppresses": ["I50.9", "I50.20"],
+        "covers_groups": ["heart failure", "chf"]
     },
-
-    # ── CKD STAGE-SPECIFIC ─────────────────────────────────────────────────────
-
     {
         "id": "CKD_STAGE_3B",
-        "entity_all": ["stage 3b"],
-        "entity_signals": ["chronic kidney", "ckd", "renal"],
-        "trigger_prefixes": ["N18"],
-        "result": "N18.32",
-        "result_desc": "Chronic kidney disease, stage 3b",
-        "result_group": "N18",
-        "priority": 10,
-        "eliminate_prefixes": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27"],
-        "eliminate_codes": ["N18.9", "N18.30", "N18.3", "N18.31"],
+        "conditions": ["stage 3b", "chronic kidney"],
+        "code": "N18.32",
+        "desc": "Chronic kidney disease, stage 3b",
+        "suppresses": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27", "N18.9", "N18.30", "N18.3", "N18.31"],
+        "covers_groups": ["ckd", "chronic kidney", "renal disease"]
     },
     {
         "id": "CKD_STAGE_3A",
-        "entity_all": ["stage 3a"],
-        "entity_signals": ["chronic kidney", "ckd", "renal"],
-        "trigger_prefixes": ["N18"],
-        "result": "N18.31",
-        "result_desc": "Chronic kidney disease, stage 3a",
-        "result_group": "N18",
-        "priority": 10,
-        "eliminate_prefixes": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27"],
-        "eliminate_codes": ["N18.9", "N18.30", "N18.3", "N18.32"],
+        "conditions": ["stage 3a", "chronic kidney"],
+        "code": "N18.31",
+        "desc": "Chronic kidney disease, stage 3a",
+        "suppresses": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27", "N18.9", "N18.30", "N18.3", "N18.32"],
+        "covers_groups": ["ckd", "chronic kidney", "renal disease"]
     },
     {
         "id": "CKD_STAGE_3",
-        "entity_all": ["stage 3"],
-        "entity_signals": ["chronic kidney", "ckd", "renal"],
-        "trigger_prefixes": ["N18"],
-        "result": "N18.3",
-        "result_desc": "Chronic kidney disease, stage 3 unspecified",
-        "result_group": "N18",
-        "priority": 9,
-        "eliminate_prefixes": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27"],
-        "eliminate_codes": ["N18.9", "N18.30"],
+        "conditions": ["stage 3", "chronic kidney"],
+        "code": "N18.3",
+        "desc": "Chronic kidney disease, stage 3 unspecified",
+        "suppresses": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27", "N18.9", "N18.30"],
+        "covers_groups": ["ckd", "chronic kidney", "renal disease"]
     },
     {
         "id": "CKD_STAGE_4",
-        "entity_all": ["stage 4"],
-        "entity_signals": ["chronic kidney", "ckd"],
-        "trigger_prefixes": ["N18"],
-        "result": "N18.4",
-        "result_desc": "Chronic kidney disease, stage 4",
-        "result_group": "N18",
-        "priority": 9,
-        "eliminate_prefixes": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27"],
-        "eliminate_codes": ["N18.9", "N18.3"],
+        "conditions": ["stage 4", "chronic kidney"],
+        "code": "N18.4",
+        "desc": "Chronic kidney disease, stage 4",
+        "suppresses": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27", "N18.9", "N18.3"],
+        "covers_groups": ["ckd", "chronic kidney", "renal disease"]
     },
     {
         "id": "CKD_STAGE_5_ESRD",
-        "entity_all": ["esrd"],
-        "entity_signals": ["end stage renal", "end-stage renal", "stage 5"],
-        "trigger_prefixes": ["N18"],
-        "result": "N18.6",
-        "result_desc": "End stage renal disease",
-        "result_group": "N18",
-        "priority": 10,
-        "eliminate_prefixes": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27"],
-        "eliminate_codes": ["N18.9", "N18.3", "N18.4", "N18.5"],
+        "conditions": ["esrd"],
+        "code": "N18.6",
+        "desc": "End stage renal disease",
+        "suppresses": ["N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27", "N18.9", "N18.3", "N18.4", "N18.5"],
+        "covers_groups": ["ckd", "chronic kidney", "esrd", "renal disease"]
     },
-
-    # ── HYPERTENSION COMPLICATIONS ────────────────────────────────────────────
-
     {
         "id": "HTN_WITH_HEART_FAILURE",
-        "entity_all": ["hypertension", "heart failure"],
-        "entity_signals": ["hypertensive"],
-        "trigger_prefixes": ["I11", "I50"],
-        "result": "I11.0",
-        "result_desc": "Hypertensive heart disease with heart failure",
-        "result_group": "I11",
-        "priority": 8,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["I11.9"],
+        "conditions": ["hypertension", "heart failure"],
+        "code": "I11.0",
+        "desc": "Hypertensive heart disease with heart failure",
+        "suppresses": ["I11.9"],
+        "covers_groups": ["hypertension", "htn", "heart failure", "chf"]
     },
     {
         "id": "HTN_WITH_CKD",
-        "entity_all": ["hypertension", "chronic kidney"],
-        "entity_signals": ["hypertensive"],
-        "trigger_prefixes": ["I12", "N18"],
-        "result": "I12.9",
-        "result_desc": "Hypertensive chronic kidney disease with stage 1-4 or unspecified CKD",
-        "result_group": "I12",
-        "priority": 7,
-        "eliminate_prefixes": [],
-        "eliminate_codes": ["I10"],
+        "conditions": ["hypertension", "chronic kidney"],
+        "code": "I12.9",
+        "desc": "Hypertensive chronic kidney disease with stage 1-4 or unspecified CKD",
+        "suppresses": ["I10"],
+        "covers_groups": ["hypertension", "htn", "ckd", "chronic kidney"]
     },
 ]
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CLINICAL EXCLUSIVITY RULES (NEW — FIX 1)
-# When a specific diabetes type or condition is confirmed, certain code prefixes
-# are COMPLETELY EXCLUDED, regardless of RAG or scoring results.
-#
-# Format:
-#   note_signals:  ANY of these phrases in note → rule fires (partial match)
-#   exclude_prefixes: remove ALL codes starting with these 3-char prefixes
-#   exclude_exact:    also remove these exact codes
-#   protect_prefixes: these prefixes are ALLOWED (whitelist) — optional
+# CLINICAL EXCLUSIVITY RULES
 # ─────────────────────────────────────────────────────────────────────────────
-
 CLINICAL_EXCLUSIVITY_RULES: list[dict] = [
-    # ── TYPE 2 DIABETES → remove Type 1 (E10.*) and Other (E13.*) ──────────
     {
         "id": "DM_TYPE2_EXCLUSIVITY",
         "note_signals": ["type 2 diabetes", "t2dm", "dm2", "dm 2", "type ii diabetes"],
@@ -293,7 +162,6 @@ CLINICAL_EXCLUSIVITY_RULES: list[dict] = [
         "exclude_exact": [],
         "description": "Only E11.* allowed when Type 2 diabetes is confirmed",
     },
-    # ── TYPE 1 DIABETES → remove Type 2 (E11.*) and Other (E13.*) ──────────
     {
         "id": "DM_TYPE1_EXCLUSIVITY",
         "note_signals": ["type 1 diabetes", "t1dm", "dm1", "type i diabetes"],
@@ -301,21 +169,17 @@ CLINICAL_EXCLUSIVITY_RULES: list[dict] = [
         "exclude_exact": [],
         "description": "Only E10.* allowed when Type 1 diabetes is confirmed",
     },
-    # ── ESSENTIAL HYPERTENSION → remove secondary HTN (I15.*) ──────────────
-    # (Only fires if note does NOT also say "secondary" or "renovascular" etc.)
     {
         "id": "HTN_ESSENTIAL_EXCLUSIVITY",
         "note_signals": ["hypertension", "htn", "high blood pressure"],
-        "anti_signals": ["secondary hypertension", "renovascular", "renal hypertension",
-                         "endocrine hypertension", "I15"],
+        "anti_signals": ["secondary hypertension", "renovascular", "renal hypertension", "endocrine hypertension", "I15"],
         "exclude_prefixes": ["I15"],
         "exclude_exact": [],
         "description": "I15 (secondary HTN) blocked unless secondary HTN explicitly stated",
     },
-    # ── NO METABOLIC SYNDROME MENTIONED → block E88.x cluttering ───────────
     {
         "id": "METABOLIC_NOISE_FILTER",
-        "note_signals": ["*"],   # always active
+        "note_signals": ["*"],
         "anti_signals": ["metabolic syndrome", "e88", "metabolic disorder"],
         "exclude_prefixes": ["E88"],
         "exclude_exact": [],
@@ -323,26 +187,15 @@ CLINICAL_EXCLUSIVITY_RULES: list[dict] = [
     },
 ]
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CROSS-PREFIX SUPPRESSION OVERRIDES (UPDATED — FIX 2: supports prefix wildcards)
-#
-# Format: {trigger_code_or_prefix: ["P:G62", "EXACT:G62.9", ...]}
-#   "P:XYZ"      = remove ALL codes with 3-char prefix XYZ
-#   "EXACT:X.YZ" = remove only this exact code
-#   bare string  = treated as EXACT (backward compat)
+# CROSS-PREFIX SUPPRESSION OVERRIDES
 # ─────────────────────────────────────────────────────────────────────────────
-
 CROSS_PREFIX_SUPPRESS: dict[str, list[str]] = {
-    # Diabetic neuropathy compound code → suppress ALL standalone neuropathy families
     "E11.42": ["P:G57", "P:G58", "P:G59", "P:G60", "P:G61", "P:G62", "P:G63", "P:G64"],
-    "E11.41": ["P:G57", "P:G56"],
-    # Diabetic retinopathy → suppress standalone retinal codes
+    "E11.41": ["P:G57", "P:G58", "P:G56"],
     "E11.319": ["EXACT:H35.00"],
     "E11.3519": ["EXACT:H35.31"],
-    # Diabetic CKD → suppress general CKD unspecified
     "E11.22": ["EXACT:N18.9"],
-    # Hypertensive CKD → suppress plain essential hypertension (already have I12.x)
     "I12.9":  ["EXACT:I10"],
     "I13.0":  ["EXACT:I10", "EXACT:I11.9", "EXACT:I50.9"],
     "I13.2":  ["EXACT:I10", "EXACT:I11.9", "EXACT:I50.9"],
@@ -350,9 +203,8 @@ CROSS_PREFIX_SUPPRESS: dict[str, list[str]] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CROSS-HIERARCHY SUPPRESSION ENGINE (NEW — V8 FIX 1)
+# CROSS-HIERARCHY SUPPRESSION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
-
 HIERARCHY_SUPPRESSION: dict[str, list[str]] = {
     "E11.42": ["G62", "G60", "G61", "G56"],
     "E11.40": ["G62", "G60", "G61", "G56"],
@@ -362,103 +214,71 @@ HIERARCHY_SUPPRESSION: dict[str, list[str]] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MANDATORY GROUPS COMPLETENESS (NEW — V8 FIX 6)
+# MANDATORY GROUPS COMPLETENESS
 # ─────────────────────────────────────────────────────────────────────────────
-
 MANDATORY_GROUPS = {
-    "diabetes":          {"code": "E11.9", "desc": "Type 2 diabetes mellitus without complications"},
-    "hypertension":      {"code": "I10", "desc": "Essential (primary) hypertension"},
-    "chronic kidney":    {"code": "N18.9", "desc": "Chronic kidney disease, unspecified"},
-    "ckd":               {"code": "N18.9", "desc": "Chronic kidney disease, unspecified"},
-    "heart failure":     {"code": "I50.9", "desc": "Heart failure, unspecified"},
-    "neuropathy":        {"code": "G62.9", "desc": "Polyneuropathy, unspecified"},
-    "obesity":           {"code": "E66.9", "desc": "Obesity, unspecified"},
-    "lipid":             {"code": "E78.5", "desc": "Hyperlipidemia, unspecified"}
+    "diabetes":          {"code": "E11.9", "description": "Type 2 diabetes mellitus without complications"},
+    "hypertension":      {"code": "I10", "description": "Essential (primary) hypertension"},
+    "chronic kidney":    {"code": "N18.9", "description": "Chronic kidney disease, unspecified"},
+    "ckd":               {"code": "N18.9", "description": "Chronic kidney disease, unspecified"},
+    "heart failure":     {"code": "I50.9", "description": "Heart failure, unspecified"},
+    "neuropathy":        {"code": "G62.9", "description": "Polyneuropathy, unspecified"},
+    "obesity":           {"code": "E66.9", "description": "Obesity, unspecified"},
+    "lipid":             {"code": "E78.5", "description": "Hyperlipidemia, unspecified"},
+    "sepsis":            {"code": "A41.9", "description": "Sepsis, unspecified"},
+    "pneumonia":         {"code": "J18.9", "description": "Pneumonia, unspecified"},
 }
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HARD-REJECT CATEGORIES
-# Codes starting with these prefixes are rejected UNLESS the note contains
-# one of the required keywords. Empty list = reject always (unless det_set).
 # ─────────────────────────────────────────────────────────────────────────────
-
 HARD_REJECT_PREFIXES: dict[str, list[str]] = {
     "O":  ["pregnan", "obstetric", "maternal", "antepartum", "postpartum", "labour", "labor", "gestation", "trimester"],
-    "V":  [],    # vehicle/external cause — never valid in a medical coding note
+    "V":  [],
     "P":  ["neonat", "perinatal", "newborn", "premature", "infant"],
     "Q":  ["congenital", "malformation", "anomaly", "genetic"],
 }
 
-# These are always rejected unless explicitly in det_set (even if keyword present)
 ALWAYS_REJECT_PREFIXES: set[str] = {"V"}
 
-# N01–N08, N25–N27 are nephrotic/nephritic syndrome codes that leak into
-# CKD RAG results. Rejected when CKD is the primary entity.
 RENAL_SYNDROME_PREFIXES: set[str] = {
-    "N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08",
-    "N25", "N26", "N27",
+    "N01", "N02", "N03", "N04", "N05", "N06", "N07", "N08", "N25", "N26", "N27",
 }
 
 CKD_ENTITY_SIGNALS: list[str] = [
-    "chronic kidney", "ckd", "renal disease", "nephropathy",
-    "kidney disease", "renal failure", "kidney failure",
+    "chronic kidney", "ckd", "renal disease", "nephropathy", "kidney disease", "renal failure", "kidney failure",
 ]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTITY-TO-PREFIX COVERAGE MAP
-# Maps normalized entity keywords to allowed ICD-10 3-char prefixes.
-# Used to validate that RAG-only codes map to something mentioned in the note.
-# Auto-derived hierarchy covers same-prefix; this covers cross-prefix alignment.
 # ─────────────────────────────────────────────────────────────────────────────
-
 ENTITY_PREFIX_MAP: dict[str, list[str]] = {
-    # Diabetes
     "diabet": ["E10", "E11", "E13", "E08", "E09"],
     "dm2": ["E11"], "dm1": ["E10"],
     "t2dm": ["E11"], "t1dm": ["E10"],
-    # CKD / Renal
-    "chronic kidney": ["N18"],
-    "ckd": ["N18"],
+    "chronic kidney": ["N18"], "ckd": ["N18"],
     "renal failure": ["N18", "N17", "N19"],
     "kidney disease": ["N18", "N17"],
-    "nephropathy": ["N18", "E11", "E10"],
-    "aki": ["N17"],
-    # Heart
-    "heart failure": ["I50"],
-    "cardiac failure": ["I50"],
+    "nephropathy": ["N18", "E11", "E10"], "aki": ["N17"],
+    "heart failure": ["I50"], "cardiac failure": ["I50"],
     "heart attack": ["I21"], "ami": ["I21"],
     "myocardial infarct": ["I21", "I22"],
     "stemi": ["I21"], "nstemi": ["I21"],
-    "cad": ["I25"], "coronary": ["I25"],
-    "angina": ["I20"],
+    "cad": ["I25"], "coronary": ["I25"], "angina": ["I20"],
     "atrial fibrillation": ["I48"], "afib": ["I48"], "a-fib": ["I48"],
-    # Hypertension
     "hypertension": ["I10", "I11", "I12", "I13"],
-    "htn": ["I10", "I11", "I12", "I13"],
-    "high blood pressure": ["I10"],
-    # Neuropathy (standalone — valid only without diabetes context)
+    "htn": ["I10", "I11", "I12", "I13"], "high blood pressure": ["I10"],
     "neuropath": ["G60", "G61", "G62", "G63", "E11", "E10"],
     "peripheral neuropath": ["G62", "E11"],
-    # Obesity / Metabolic
-    "obesi": ["E66"],
-    "overweight": ["E66"], "bmi": ["Z68"],
-    "hyperlipid": ["E78"], "dyslipid": ["E78"],
-    "cholesterol": ["E78"], "triglyc": ["E78"],
+    "obesi": ["E66"], "overweight": ["E66"], "bmi": ["Z68"],
+    "hyperlipid": ["E78"], "dyslipid": ["E78"], "cholesterol": ["E78"], "triglyc": ["E78"],
     "gout": ["M10"], "hyperuricemia": ["E79"],
-    # Liver
     "cirrhosis": ["K74"], "hepatitis": ["K72", "B18", "B19"],
     "fatty liver": ["K76"], "nash": ["K75"],
-    # Lung / Respiratory
-    "copd": ["J44"], "emphysema": ["J43"],
-    "asthma": ["J45"], "bronchospasm": ["J45"],
-    "pneumonia": ["J18", "J15", "J13"],
-    "respiratory failure": ["J96"],
+    "copd": ["J44"], "emphysema": ["J43"], "asthma": ["J45"], "bronchospasm": ["J45"],
+    "pneumonia": ["J18", "J15", "J13"], "respiratory failure": ["J96"],
     "pulmonary embolism": ["I26"], "pe": ["I26"],
     "dvt": ["I82"], "deep vein thrombosis": ["I82"],
-    # Sepsis
-    "sepsis": ["A41", "A40"],
     "bacteremia": ["A41"],
     # Anemia
     "anemia": ["D50", "D51", "D63", "D64"],
@@ -480,6 +300,15 @@ ENTITY_PREFIX_MAP: dict[str, list[str]] = {
     "osteoporosis": ["M80", "M81"],
     "fracture": ["S", "M80"],
     "fall": ["W"],
+    "displaced": ["S"],
+    "nondisplaced": ["S"],
+    "femoral neck fracture": ["S72"],
+    "intertrochanteric fracture": ["S72"],
+    "hip fracture": ["S72", "M80"],
+    "internal fixation": ["CPT", "S"],
+    "fixation": ["CPT", "S"],
+    "open fracture": ["S"],
+    "closed fracture": ["S"],
     # Mental
     "depression": ["F32", "F33"],
     "anxiety": ["F41"],
@@ -513,5 +342,64 @@ RELATIONSHIP_VALIDATION_RULES: list[dict] = [
         "target_prefixes": ["I11", "I13"],
         "required_entities": ["hypertension", "heart failure"],
         "description": "Hypertensive heart disease requires mention of both HTN and HF",
+    }
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOMAIN-SPECIFIC BOOSTS (TASK 85)
+# Target weak domains with high-confidence grounding triggers.
+# ─────────────────────────────────────────────────────────────────────────────
+DOMAIN_SPECIFIC_BOOSTS = {
+    "orthopedics": {
+        "prefixes": ["S72", "S82", "S42", "S52", "S32"],
+        "triggers": ["displaced", "nondisplaced", "comminuted", "oblique", "transverse", "spiral", "impacted", "angulated"],
+        "laterality_required": True,
+        "boost_amount": 0.15
+    },
+    "endocrine": {
+        "prefixes": ["E11", "E10"],
+        "triggers": ["retinopathy", "neuropathy", "nephropathy", "ulcer", "gangrene", "gastroparesis", "polyneuropathy"],
+        "boost_amount": 0.20
+    },
+    "cardiology": {
+        "prefixes": ["I50", "I21", "I25"],
+        "triggers": ["systolic", "diastolic", "nstemi", "stemi", "exacerbation", "decompensated"],
+        "boost_amount": 0.10
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOMAIN MERGE RULES (TASK 85)
+# Logical combinations for high-impact specialties.
+# ─────────────────────────────────────────────────────────────────────────────
+DOMAIN_MERGE_RULES = [
+    {
+        "id": "CARDIOLOGY_HTN_HF_MERGE",
+        "domain": "cardiology",
+        "members": ["I10", "I50"],
+        "target": "I11.0",
+        "requires_all": True
+    },
+    {
+        "id": "NEPHROLOGY_HTN_CKD_MERGE",
+        "domain": "nephrology",
+        "members": ["I10", "N18"],
+        "target": "I12.9",
+        "requires_all": True
+    },
+    {
+        "id": "ENDOCRINE_DM_CKD_MERGE",
+        "domain": "endocrine",
+        "members": ["E11", "N18"],
+        "target": "E11.22",
+        "requires_all": True
+    },
+    {
+        "id": "SEPSIS_AKI_ASSOCIATION",
+        "domain": "sepsis",
+        "members": ["A41", "N17"],
+        "target": "A41.9", # Sepsis remains primary but AKI is protected
+        "requires_all": True,
+        "protect_members": True
     }
 ]

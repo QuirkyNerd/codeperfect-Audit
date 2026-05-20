@@ -1,266 +1,134 @@
-# CodePerfect Audit
+# CodePerfectAuditor
 
-CodePerfect Audit is an AI-powered clinical coding audit system designed to analyze medical notes and validate ICD-10 and CPT codes before claim submission. The system helps reduce revenue leakage, improve coding accuracy, and support compliance in healthcare billing workflows.
+**CodePerfectAuditor** is an enterprise-grade, AI-powered clinical coding audit system. It acts as an intelligent co-pilot for Clinical Documentation Improvement (CDI) specialists and medical coders by validating ICD-10 and CPT codes against clinical notes before claim submission. 
 
----
-
-## Overview
-
-The platform processes clinical notes through a multi-stage AI pipeline and compares human-entered codes with AI-generated codes. It identifies discrepancies, highlights missing or incorrect codes, and provides supporting evidence from the clinical text.
+By leveraging a highly defensive **5-stage AI pipeline** (deterministic extraction + RAG + LLM reasoning), the system strictly prevents medical hallucinations, identifying missed codes (revenue leakage) and unsupported codes (compliance risk) with high clinical accuracy.
 
 ---
 
-## Live Deployment
+## 🏗️ Architecture & Pipeline (v5)
 
-Frontend:  
-https://codeperfect-audit.vercel.app  
+CodePerfectAuditor rejects the "black-box LLM" approach. Instead, it utilizes a heavily constrained, multi-agent orchestrator:
 
-Backend API:  
-https://codeperfect-audit.onrender.com  
-
-Embedding Service (Hugging Face):  
-https://adithya3003-codeperfect-embeddings.hf.space/
-
----
-
-
-##  Architecture
-
-```
-Clinical Note
-     ↓
-Clinical Reader Agent   ← Gemini + structured prompt
-     ↓
-Structured Clinical Facts
-     ↓
-Coding Logic Agent      ← RAG (ChromaDB) + Gemini reasoning
-     ↓
-AI-Generated Codes (with confidence scores)
-     ↓
-Auditor Agent           ← Gemini + deterministic set comparison
-     ↓
-Discrepancy Report
-     ↓
-Evidence Highlighter    ← SentenceIndexer (deterministic)
-     ↓
-Frontend Dashboard      ← React + Vite
-```
+1. **Deterministic Entity Extraction**: A FAANG-grade regex parser maps clinical terms and handles negation/context locally before any AI is invoked.
+2. **Entity-Level RAG**: Queries ChromaDB independently *for each extracted condition* (rather than dumping the whole note), ensuring highly relevant ICD/CPT retrieval.
+3. **Terminal Evidence Gate**: The `ClinicalReasoningEngine` explicitly drops codes lacking textual grounding and aggressively filters out diagnoses derived from prophylactic contexts (e.g., DVT prophylaxis).
+4. **Deterministic Rule Engine**: Encodes static billing guidelines (e.g., ICD-10 hierarchy upgrades for Diabetes + CKD, and symptom exclusion).
+5. **Auditor Agent**: Uses Google Gemini (via strict JSON-enforced REST calls) to compare the validated AI code set against human-submitted codes to generate actionable discrepancies.
 
 ---
 
-##  Project Structure
+## 🌐 Live Deployment
 
-```
-CodePerfectAuditor/
-├── backend/
-│   ├── main.py                       
-│   ├── config.py                      
-│   ├── api/routes.py                  
-│   ├── agents/
-│   │   ├── clinical_reader.py        
-│   │   ├── coding_logic.py            
-│   │   ├── auditor.py                
-│   │   └── evidence_agent.py         
-│   ├── services/
-│   │   ├── agent_orchestrator.py     
-│   │   ├── rag_engine.py             
-│   │   ├── embedding_service.py      
-│   │   └── guideline_loader.py   
-│   ├── database/
-│   │   ├── models.py                 
-│   │   └── db.py                     
-│   ├── utils/
-│   │   ├── sentence_indexer.py       
-│   │   ├── text_processing.py        
-│   │   └── logging.py               
-│   └── prompts/
-│       ├── clinical_reader_prompt.txt
-│       ├── coding_logic_prompt.txt
-│       └── auditor_prompt.txt
-├── frontend/
-│   ├── src/
-│   │   ├── pages/Dashboard.jsx       
-│   │   ├── components/
-│   │   │   ├── UploadNote.jsx        
-│   │   │   ├── CodeInput.jsx         
-│   │   │   └── AuditResults.jsx    
-│   │   └── services/api.js         
-│   ├── package.json
-│   └── vite.config.js
-├── data/
-│   ├── icd10_codes.csv                
-│   ├── cpt_codes.csv                
-│   └── coding_guidelines/            
-├── scripts/
-│   └── ingest_guidelines.py          
-├── tests/
-│   ├── conftest.py
-│   ├── test_clinical_reader.py
-│   ├── test_coding_logic.py
-│   └── test_auditor.py
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-└── .env.example
-```
+**Frontend:** [https://codeperfect-audit.vercel.app](https://codeperfect-audit.vercel.app)  
+**Backend API:** [https://codeperfect-audit.onrender.com](https://codeperfect-audit.onrender.com)  
+
+*(Note: Production endpoints may require authorized tenant credentials)*
 
 ---
 
-##  Quick Start (Local)
+## 🛠️ Tech Stack
+
+**Backend:**
+- **Framework**: FastAPI (Async Python 3.11)
+- **Database**: PostgreSQL (NeonDB) + SQLAlchemy (Async)
+- **Vector Store**: ChromaDB (Persistent)
+- **Cache / Queue**: Redis (Hiredis)
+- **Security**: JWT Auth, Fernet PHI Encryption, Role-Based Access Control (RBAC)
+
+**Frontend:**
+- **Framework**: React.js + Vite + TailwindCSS
+- **State Management**: React Context API
+- **HTTP Client**: Axios with automatic 401 interception
+
+**AI / ML:**
+- **LLM**: Google Gemini API (Strict Temperature 0.0 JSON responses)
+- **Embeddings**: `all-MiniLM-L6-v2` via Hugging Face `sentence-transformers`
+
+---
+
+## 🚀 Quick Start (Local)
 
 ### 1. Prerequisites
+Ensure you have Python 3.11+, Node.js 20+, and PostgreSQL running locally or via Docker.
 
-## Tech Stack
-
-### Backend
-- FastAPI
-- Gemini API (LLM reasoning)
-- Neon PostgreSQL (cloud database)
-- SQLAlchemy
-
-### Frontend
-- React + Vite
-- Axios
-- Hosted on Vercel
-
-### AI / ML
-- Gemini (LLM)
-- MiniLM-L6-v2 (embeddings via Hugging Face)
-- Retrieval-Augmented Generation (RAG)
-
-### 2. Clone & configure
-
+### 2. Clone & Configure
 ```bash
-cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
+git clone <repository_url>
+cd CodePerfectAuditor
 copy .env.example backend\.env
 ```
+*(Ensure `GEMINI_API_KEY` and `DATABASE_URL` are set in `.env`)*
 
-### 3. Install Python dependencies
-
+### 3. Install Python Dependencies
 ```bash
+cd backend
 pip install -r requirements.txt
-pip install pytest pytest-asyncio
 ```
 
-### 4. Ingest reference data into ChromaDB
-
-Run this **once** before starting the server:
-
+### 4. Ingest Reference Data into ChromaDB
+Run this **once** before starting the server to populate the RAG vector store:
 ```bash
-cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
-python scripts/ingest_guidelines.py
+python ../scripts/ingest_guidelines.py
 ```
 
-
-### 5. Start the backend
-
+### 5. Start the Backend Server
 ```bash
-cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor/backend
 uvicorn main:app --reload --port 8000
 ```
 
-
-### 6. Start the frontend
-
+### 6. Start the Frontend
 ```bash
-cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor/frontend
+cd ../frontend
 npm install
 npm run dev
 ```
 
+---
 
-##  Docker (with PostgreSQL)
+## 🐳 Docker Deployment
 
+The system is fully containerized for immediate deployment:
 ```bash
-cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
-
+# In the project root
 copy .env.example .env
 docker-compose up --build
-
 ```
-##  Testing
+This spins up the FastAPI backend, the React frontend, and a local PostgreSQL instance.
 
+---
+
+## 🧪 Testing
+
+The backend includes a comprehensive `pytest` suite for agent and pipeline logic:
 ```bash
-cd d:/Desktop/virtusa_jatayu/CodePerfectAuditor
 pytest tests/ -v
 ```
 
 ---
 
-## 🔌 API Reference
-
-### `POST /api/v1/audit`
-
-**Request:**
-```json
-{
-  "note_text": "Patient presents with uncontrolled hypertension and type 2 diabetes. Underwent laparoscopic cholecystectomy.",
-  "human_codes": ["I10"]
-}
-```
-
-**Response:**
-```json
-{
-  "audit_id": 1,
-  "ai_codes": [
-    { "code": "I10",   "description": "Essential hypertension", "type": "ICD-10", "confidence": 0.95 },
-    { "code": "E11.9", "description": "Type 2 DM", "type": "ICD-10", "confidence": 0.90 },
-    { "code": "47562", "description": "Laparoscopic cholecystectomy", "type": "CPT", "confidence": 0.88 }
-  ],
-  "low_confidence_codes": [],
-  "discrepancies": [
-    { "code": "E11.9",  "type": "missed_code",  "message": "...", "severity": "high" },
-    { "code": "47562",  "type": "missed_code",  "message": "...", "severity": "high" },
-    { "code": "I10",    "type": "correct_code", "message": "...", "severity": "low" }
-  ],
-  "evidence": [
-    { "code": "I10",  "sentence_id": 0, "sentence_text": "Patient presents with uncontrolled hypertension...", "start_char": 0, "end_char": 51 }
-  ],
-  "summary": "Human coder missed 2 codes...",
-  "timestamp": "2025-01-01T00:00:00"
-}
-```
-
-### `GET /api/v1/health`
-
-```json
-{
-  "status": "ok",
-  "database": "connected",
-  "vector_db": "connected",
-  "service": "CodePerfectAuditor",
-  "version": "1.0.0"
-}
-
-```
----
-
----
-
-## Configuration
+## ⚙️ Core Configuration Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | **required** | Your Gemini API key |
-| `GEMINI_MODEL` | `gemini-1.5-pro` | Model used for agent reasoning |
-| `DATABASE_URL` | Neon PostgreSQL | Connection string for Neon database |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model for embeddings |
-| `MIN_CODE_CONFIDENCE` | `0.65` | Confidence threshold for filtering codes |
-| `RAG_TOP_K` | `10` | Number of top results retrieved in RAG |
+| `GEMINI_API_KEY` | **required** | Your Gemini API key for LLM orchestration. |
+| `DATABASE_URL` | **required** | Async Postgres connection string (e.g., Neon). |
+| `PHI_ENCRYPTION_KEY` | **required** | Fernet key for encrypting patient notes at rest. |
+| `SECRET_KEY` | **required** | Cryptographic key for signing JWTs. |
+| `RAG_TOP_K` | `10` | Number of vector results retrieved per entity. |
 
 ---
 
-## Key Design Decisions
+## 🛡️ Enterprise Readiness & Security
 
-| Feature | Implementation |
-|---|---|
-| Agent orchestration | `AgentOrchestrator` with sequential multi-agent pipeline and shared state |
-| Evidence highlighting | `SentenceIndexer` with deterministic character span mapping |
-| Confidence threshold | Low-confidence codes are separated for manual review |
-| Deterministic fallback | Auditor agent uses set-based comparison if AI response fails |
-| Database | Neon PostgreSQL for scalable cloud storage |
-| Structured logging | JSON-based logging for observability and debugging |
-| Retry logic | Agents retry up to `AGENT_MAX_RETRIES` on failure |
+CodePerfectAuditor is designed for healthcare compliance:
+- **Data Isolation**: Multi-tenant architecture (Organizations/Branches) with strict data boundaries.
+- **Demo Sandboxing**: Hard-partitioned database queries (`is_demo=True`) ensure public demo users never interact with production patient data.
+- **PHI Masking & Encryption**: Sensitive identifiers are masked before reaching the LLM and symmetrically encrypted (AES-128) before resting in PostgreSQL.
+- **Concurrency Locking**: Audit cases lock for 10 minutes when opened by Reviewers to prevent conflicting manual edits.
+- **Financial Analytics**: Live calculation of USD/INR revenue impact using CMS Medicare 2024 schedules.
 
 ---
+
+## 📄 Complete Project Documentation
+For a deep, exhaustive reverse-engineering report covering the end-to-end data flow, API architecture, database schemas, and prompt engineering strategy, please refer to the `COMPLETE_PROJECT_ANALYSIS.md` located in the root directory.

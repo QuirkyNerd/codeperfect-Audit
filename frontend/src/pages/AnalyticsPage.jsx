@@ -183,6 +183,10 @@ export default function AnalyticsPage() {
                 <KpiCard icon="" label="High Risk Cases"    value={n(overview.high_risk_cases)}   color="#ef4444" />
                 <KpiCard icon="" label="Under-coding"        value={n(overview.undercoding_count)} color="#8b5cf6" />
                 <KpiCard icon="" label="Over-coding"         value={n(overview.overcoding_count)}  color="#06b6d4" />
+                
+                <KpiCard icon="" label="Approval Rate"      value={`${n(overview.approval_rate_pct)}%`} color="#10b981" sub="Resolved cases approved" />
+                <KpiCard icon="" label="Rejection Rate"     value={`${n(overview.rejection_rate_pct)}%`} color="#ef4444" sub="Resolved cases rejected" />
+                <KpiCard icon="" label="Avg Processing Time" value={`${n(overview.avg_processing_time)}s`} color="#6366f1" sub="End-to-end audit duration" />
               </div>
 
               {n(overview.total_cases) === 0 && (
